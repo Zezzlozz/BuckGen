@@ -385,7 +385,7 @@ async def trade_swap(
 
 
 @app.post("/trade/arbitrage")
-async def trade_arbitrage(chain: str = "ethereum", capital_eur: float = 100.0):
+async def trade_arbitrage(chain: str = "ethereum", capital_eur: float = 500.0):
     """
     Execute the best detected arbitrage opportunity on a given chain.
     """

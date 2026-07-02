@@ -1,25 +1,31 @@
 """
-DeFi Execution Module — swap tokens via 1inch Aggregator API.
+DeFi Execution Module — swap tokens via 1inch Aggregator API
+and execute CEX-CEX arbitrage via ccxt.
 
-This module enables the agent to EXECUTE detected arbitrage opportunities.
-It uses the 1inch API to find the best swap routes and submits transactions
-through the agent's HD wallet.
+This module enables the agent to:
+  1. Swap tokens on-chain via 1inch Aggregator API
+  2. Execute CEX-CEX arbitrage by buying on the cheap exchange
+     and selling on the expensive exchange using ccxt trade API keys
 
 Supported chains: ethereum, base, arbitrum, polygon, bsc
+Supported CEXes: Binance, Kraken, Bybit (via trade API keys)
 Capital: EUR 100+ available
 
 Security:
   - All swaps go through budget guard (daily cap + stop-loss)
   - Private keys never leave memory
   - Transactions are logged in the Transaction table
-  - Requires explicit confirm() call before execution
+  - Exchange trade keys are separate from read-only keys
+  - Market orders only (no limit order risk)
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
+import ccxt
 import httpx
 from sqlalchemy.orm import Session
 from web3 import Web3
@@ -31,6 +37,7 @@ from app.modules.wallet import get_private_key, derive_wallet, CHAIN_CONFIGS
 from app.modules.rpc import get_web3, get_balance, estimate_gas
 from app.utils.budget import can_spend, record_spend
 from app.utils.notify import notify_alert, notify_error
+from app.utils.pnl import record_revenue
 
 logger = logging.getLogger("buckgen.defi")
 
@@ -418,7 +425,286 @@ async def execute_swap(
 
 
 # =============================================================================
-# Arbitrage execution helper
+# CEX-CEX Arbitrage execution via ccxt
+# =============================================================================
+
+# Cached trade exchange instances
+_trade_exchanges: dict[str, ccxt.Exchange] = {}
+
+
+def _get_trade_exchange(name: str) -> Optional[ccxt.Exchange]:
+    """Get (or create) a cached ccxt exchange instance with trade API keys."""
+    if name in _trade_exchanges:
+        return _trade_exchanges[name]
+
+    try:
+        exchange_class = getattr(ccxt, name.lower(), None)
+        if exchange_class is None:
+            logger.warning("[defi] Unknown exchange: %s", name)
+            return None
+
+        # Map exchange names to trade key config settings
+        trade_key_map = {
+            "binance": ("BINANCE_TRADE_KEY", "BINANCE_TRADE_SECRET"),
+            "kraken": ("KRAKEN_TRADE_KEY", "KRAKEN_TRADE_SECRET"),
+            "bybit": ("BYBIT_TRADE_KEY", "BYBIT_TRADE_SECRET"),
+        }
+
+        key_name, secret_name = trade_key_map.get(name, (None, None))
+        api_key = getattr(settings, key_name, "") if key_name else ""
+        api_secret = getattr(settings, secret_name, "") if secret_name else ""
+
+        if not api_key or not api_secret:
+            logger.warning(
+                "[defi] No trade API keys configured for %s (set %s and %s env vars)",
+                name,
+                key_name,
+                secret_name,
+            )
+            return None
+
+        config = {
+            "apiKey": api_key,
+            "secret": api_secret,
+            "enableRateLimit": True,
+            "timeout": 15000,
+            "options": {"defaultType": "spot"},
+        }
+
+        exchange = exchange_class(config)
+        exchange.load_markets()
+        _trade_exchanges[name] = exchange
+        logger.info(
+            "[defi] Trade exchange %s connected (%d markets)",
+            name,
+            len(exchange.markets),
+        )
+        return exchange
+
+    except Exception as exc:
+        logger.warning("[defi] Failed to init trade exchange %s: %s", name, exc)
+        return None
+
+
+async def execute_cex_arbitrage(
+    db: Session,
+    opportunity: dict,
+    capital_eur: float = 500.0,
+) -> dict:
+    """
+    Execute a CEX-CEX arbitrage opportunity by placing market orders
+    on both exchanges via ccxt trade API keys.
+
+    Flow:
+      1. Get trade-capable exchange instances for both sides
+      2. Check USDT balance on the buy exchange
+      3. Place market BUY order on cheap exchange
+      4. Place market SELL order on expensive exchange
+      5. Record trade + revenue in P&L
+
+    Args:
+        db: Database session
+        opportunity: ArbitrageOpportunity dict from prices module
+        capital_eur: Maximum capital to deploy (default: EUR 500)
+
+    Returns:
+        Execution result dict.
+    """
+    buy_exchange_name = opportunity.get("buy_at", "")
+    sell_exchange_name = opportunity.get("sell_at", "")
+    pair = opportunity.get("pair", "")
+    buy_price = opportunity.get("buy_price", 0)
+    sell_price = opportunity.get("sell_price", 0)
+    net_profit_pct = opportunity.get("net_profit_pct", 0)
+
+    logger.info(
+        "[defi] CEX arb: Buy %s on %s @ %.4f -> Sell on %s @ %.4f (net %.2f%%)",
+        pair,
+        buy_exchange_name,
+        buy_price,
+        sell_exchange_name,
+        sell_price,
+        net_profit_pct,
+    )
+
+    # Skip CoinGecko (reference) and DEX-only opportunities
+    if "CoinGecko" in buy_exchange_name or "CoinGecko" in sell_exchange_name:
+        return {
+            "success": False,
+            "error": "Cannot execute against CoinGecko reference price",
+        }
+
+    # Get trade exchange instances
+    buy_exchange = _get_trade_exchange(buy_exchange_name)
+    sell_exchange = _get_trade_exchange(sell_exchange_name)
+
+    if not buy_exchange:
+        return {"success": False, "error": f"No trade keys for {buy_exchange_name}"}
+    if not sell_exchange:
+        return {"success": False, "error": f"No trade keys for {sell_exchange_name}"}
+
+    # Budget check: estimate max loss at 2% of capital
+    budget_needed = capital_eur * 0.02
+    if not can_spend(db, budget_needed):
+        return {"success": False, "error": "Budget cap reached"}
+
+    try:
+        # --- Step 1: Check balances on buy exchange ---
+        # We need the quote currency (e.g., USDT) to buy
+        quote = pair.split("/")[1]  # e.g., "USDT"
+        balance = buy_exchange.fetch_balance()
+        quote_free = balance.get(quote, {}).get("free", 0)
+
+        # Calculate trade size: use min(capital / buy_price, available balance * 0.95)
+        max_quote_capital = capital_eur  # assume ~1:1 EUR/USD for quote
+        trade_size_quote = min(max_quote_capital, quote_free * 0.95)
+
+        if trade_size_quote < 10:  # minimum $10 trade
+            return {
+                "success": False,
+                "error": f"Insufficient {quote} balance on {buy_exchange_name}: "
+                f"{quote_free:.2f} (need >= $10)",
+            }
+
+        # Calculate base amount (what we're buying)
+        trade_size_base = trade_size_quote / buy_price
+
+        logger.info(
+            "[defi] Trading %.4f %s (%.2f %s) on %s",
+            trade_size_base,
+            pair,
+            trade_size_quote,
+            quote,
+            buy_exchange_name,
+        )
+
+        # Record the spend for budget tracking
+        record_spend(
+            db,
+            budget_needed,
+            "defi",
+            f"CEX arb {pair}: {buy_exchange_name}->{sell_exchange_name}",
+        )
+
+        # --- Step 2: Place market BUY order on cheap exchange ---
+        buy_order = buy_exchange.create_market_buy_order(pair, trade_size_base)
+        buy_filled = float(buy_order.get("filled", 0))
+        buy_cost = float(buy_order.get("cost", 0))  # how much quote was spent
+        logger.info(
+            "[defi] BUY order filled: %f %s for %f %s",
+            buy_filled,
+            pair,
+            buy_cost,
+            quote,
+        )
+
+        if buy_filled <= 0:
+            return {"success": False, "error": "Buy order not filled"}
+
+        # --- Step 3: Place market SELL order on expensive exchange ---
+        sell_order = sell_exchange.create_market_sell_order(
+            pair, buy_filled * 0.999
+        )  # 0.1% buffer for rounding
+        sell_filled = float(sell_order.get("filled", 0))
+        sell_cost = float(sell_order.get("cost", 0))  # how much quote received
+
+        logger.info(
+            "[defi] SELL order filled: %f %s for %f %s",
+            sell_filled,
+            pair,
+            sell_cost,
+            quote,
+        )
+
+        if sell_filled <= 0:
+            return {"success": False, "error": "Sell order not filled"}
+
+        # --- Step 4: Calculate profit ---
+        gross_profit_quote = sell_cost - buy_cost
+        # Account for taker fees (0.1% per leg typical)
+        fee_pct = 0.001  # 0.1% taker fee
+        fee_cost = buy_cost * fee_pct + sell_cost * fee_pct
+        net_profit_quote = gross_profit_quote - fee_cost
+        net_profit_eur = net_profit_quote  # ~1:1 USD/EUR
+
+        # Skip if not profitable (slippage ate the spread)
+        if net_profit_eur <= 0:
+            logger.warning(
+                "[defi] CEX arb was not profitable after execution: "
+                "gross=%.4f fees=%.4f net=%.4f",
+                gross_profit_quote,
+                fee_cost,
+                net_profit_quote,
+            )
+            return {
+                "success": True,
+                "warning": "Trade executed but not profitable",
+                "buy_exchange": buy_exchange_name,
+                "sell_exchange": sell_exchange_name,
+                "pair": pair,
+                "buy_filled": buy_filled,
+                "sell_filled": sell_filled,
+                "gross_profit_eur": round(gross_profit_quote, 2),
+                "net_profit_eur": round(net_profit_quote, 2),
+            }
+
+        # --- Step 5: Record revenue ---
+        record_revenue(
+            db,
+            "arbitrage",
+            net_profit_eur,
+            source=f"{pair} {buy_exchange_name}->{sell_exchange_name}",
+            memo=f"CEX arb: bought {buy_filled:.4f} on {buy_exchange_name} @ {buy_price:.2f}, "
+            f"sold on {sell_exchange_name} @ {sell_price:.2f}",
+        )
+
+        # Log transaction
+        tx_record = Transaction(
+            wallet_id=0,
+            chain="cex",
+            tx_type="cex_arb",
+            amount_wei=str(int(trade_size_base * 1e8)),
+            status="confirmed",
+            memo=f"CEX arb {pair}: {buy_exchange_name}->{sell_exchange_name}",
+        )
+        db.add(tx_record)
+        db.commit()
+
+        await notify_alert(
+            f"CEX Arbitrage Executed: EUR {net_profit_eur:.2f}",
+            f"Pair: {pair}\n"
+            f"Buy: {buy_exchange_name} @ {buy_price:.2f}\n"
+            f"Sell: {sell_exchange_name} @ {sell_price:.2f}\n"
+            f"Volume: {buy_filled:.4f}\n"
+            f"Net Profit: EUR {net_profit_eur:.2f}",
+        )
+
+        return {
+            "success": True,
+            "buy_exchange": buy_exchange_name,
+            "sell_exchange": sell_exchange_name,
+            "pair": pair,
+            "buy_filled": buy_filled,
+            "sell_filled": sell_filled,
+            "buy_price": buy_price,
+            "sell_price": sell_price,
+            "gross_profit_eur": round(gross_profit_quote, 2),
+            "net_profit_eur": round(net_profit_eur, 2),
+        }
+
+    except ccxt.InsufficientFunds as exc:
+        logger.warning("[defi] Insufficient funds for CEX arb: %s", exc)
+        return {"success": False, "error": f"Insufficient funds: {exc}"[:120]}
+    except ccxt.NetworkError as exc:
+        logger.warning("[defi] CEX arb network error: %s", exc)
+        return {"success": False, "error": f"Network error: {exc}"[:120]}
+    except Exception as exc:
+        logger.error("[defi] CEX arb execution failed: %s", exc)
+        return {"success": False, "error": str(exc)[:200]}
+
+
+# =============================================================================
+# Arbitrage execution helper — routes to CEX or on-chain
 # =============================================================================
 
 
@@ -426,34 +712,53 @@ async def execute_arbitrage(
     db: Session,
     chain: str,
     opportunity: dict,
-    capital_eur: float = 100.0,
+    capital_eur: float = 500.0,
 ) -> dict:
     """
-    Execute an arbitrage opportunity by swapping native token.
+    Execute an arbitrage opportunity — routes to the appropriate executor.
 
-    This is a safety-guarded execution:
-      1. Validates the opportunity is still profitable
-      2. Checks budget caps
-      3. Builds and submits swap via 1inch
+    For CEX-CEX opportunities (buy_at/sell_at are exchange names like "binance"),
+    uses ccxt trade API keys to place market orders.
+
+    For on-chain opportunities (chain specified), uses 1inch swap.
 
     Args:
         db: Database session
-        chain: Chain to execute on
+        chain: Chain to execute on (for on-chain arb)
         opportunity: ArbitrageOpportunity dict from prices module
         capital_eur: Capital to deploy
 
     Returns:
         Execution result dict.
     """
-    logger.info("[defi] Executing arb: %s", opportunity.get("note", "")[:80])
+    buy_at = opportunity.get("buy_at", "").lower()
+    sell_at = opportunity.get("sell_at", "").lower()
 
-    # Calculate amount in wei
+    # Known CEX exchange names
+    cex_names = {
+        "binance",
+        "coinbase",
+        "kraken",
+        "bybit",
+        "kucoin",
+        "okx",
+        "gate",
+        "mexc",
+    }
+
+    is_cex_cex = buy_at in cex_names and sell_at in cex_names
+
+    if is_cex_cex:
+        return await execute_cex_arbitrage(db, opportunity, capital_eur)
+
+    # Fallback: on-chain swap via 1inch
+    logger.info("[defi] On-chain arb: swapping on %s", chain)
     chain_config = CHAIN_CONFIGS.get(chain, CHAIN_CONFIGS["ethereum"])
     symbol = chain_config["symbol"]
     native_address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
-    # Use ~50% of capital per trade for safety
-    trade_amount_eth = (capital_eur / 2) / 2000  # rough: EUR 50 ~= 0.025 ETH
+    # Calculate trade amount
+    trade_amount_eth = (capital_eur / 2) / 2000
     w3 = get_web3(chain)
     if w3:
         try:
@@ -470,7 +775,6 @@ async def execute_arbitrage(
     if max_trade <= 0:
         return {"success": False, "error": "Insufficient balance"}
 
-    # Swap native to USDC (simulated buy)
     usdc = USDC_ADDRESSES.get(chain, "")
     if not usdc:
         return {"success": False, "error": f"No USDC address for {chain}"}
@@ -482,15 +786,14 @@ async def execute_arbitrage(
         from_token=native_address,
         to_token=usdc,
         amount_wei=str(max_trade),
-        amount_eur_estimate=capital_eur * 0.02,  # 2% fee estimate
+        amount_eur_estimate=capital_eur * 0.02,
     )
 
     if result.success:
         await notify_alert(
-            f"Arb Executed on {chain}",
+            f"On-chain Arb Executed on {chain}",
             f"Swapped {result.from_amount:.6f} {symbol} -> USDC\n"
-            f"Tx: {result.tx_hash[:20]}...\n"
-            f"Gas: {result.gas_used_wei} wei",
+            f"Tx: {result.tx_hash[:20]}...",
         )
 
     return {

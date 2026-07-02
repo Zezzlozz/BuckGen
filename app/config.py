@@ -51,6 +51,16 @@ class Settings:
         self.BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
         self.BINANCE_SECRET: str = os.getenv("BINANCE_SECRET", "")
 
+        # -- Trade-capable exchange API keys (separate for security) ---------
+        # These must have trade/withdraw permissions. Keep separate from
+        # read-only keys above to allow principle of least privilege.
+        self.BINANCE_TRADE_KEY: str = os.getenv("BINANCE_TRADE_KEY", "")
+        self.BINANCE_TRADE_SECRET: str = os.getenv("BINANCE_TRADE_SECRET", "")
+        self.KRAKEN_TRADE_KEY: str = os.getenv("KRAKEN_TRADE_KEY", "")
+        self.KRAKEN_TRADE_SECRET: str = os.getenv("KRAKEN_TRADE_SECRET", "")
+        self.BYBIT_TRADE_KEY: str = os.getenv("BYBIT_TRADE_KEY", "")
+        self.BYBIT_TRADE_SECRET: str = os.getenv("BYBIT_TRADE_SECRET", "")
+
         # -- RPC endpoints (publicnode.com is free, no API key needed) -------
         self.ETH_RPC_URL: str = os.getenv(
             "ETH_RPC_URL", "https://ethereum.publicnode.com"

@@ -50,6 +50,18 @@ services:
         sync: false
       - key: BINANCE_SECRET
         sync: false
+      - key: BINANCE_TRADE_KEY
+        sync: false
+      - key: BINANCE_TRADE_SECRET
+        sync: false
+      - key: KRAKEN_TRADE_KEY
+        sync: false
+      - key: KRAKEN_TRADE_SECRET
+        sync: false
+      - key: BYBIT_TRADE_KEY
+        sync: false
+      - key: BYBIT_TRADE_SECRET
+        sync: false
       - key: OLLAMA_BASE_URL
         sync: false
       - key: OLLAMA_MODEL

@@ -225,10 +225,7 @@ class RevenueEntry(Base):
     memo = Column(String(512), default="")
     earned_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    __table_args__ = (
-        Index("ix_revenue_module", "module"),
-        Index("ix_revenue_earned_at", "earned_at"),
-    )
+    __table_args__ = (Index("ix_revenue_earned_at", "earned_at"),)
 
 
 # ---------------------------------------------------------------------------
