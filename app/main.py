@@ -1,0 +1,869 @@
+"""
+FastAPI application entry point.
+Initialises database, scheduler, and exposes health/liveness endpoints.
+"""
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+
+from app.config import settings
+from app.db.models import init_db, get_session, Wallet, Bounty, BountyStatus
+from app.modules.wallet import sync_wallet_to_db, zero_keyring
+from app.modules.rpc import summary as rpc_summary, check_chain
+from app.modules.system import monitor
+from app.scheduler.jobs import (
+    scan_bounties,
+    check_prices,
+    farm_airdrops,
+    check_gas_balances,
+    self_heal,
+)
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.DEBUG if settings.DEBUG else logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+)
+logger = logging.getLogger("buckgen")
+
+
+# ---------------------------------------------------------------------------
+# Scheduler
+# ---------------------------------------------------------------------------
+scheduler = AsyncIOScheduler()
+
+
+def start_scheduler() -> None:
+    """Register jobs and start the scheduler."""
+
+    # Use same DB as the app for persistent job store
+    scheduler.add_jobstore(SQLAlchemyJobStore(url=settings.DATABASE_URL))
+
+    scheduler.add_job(
+        scan_bounties,
+        CronTrigger.from_crontab(settings.CRON_BOUNTY_SCAN),
+        id="scan_bounties",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        check_prices,
+        CronTrigger.from_crontab(settings.CRON_PRICE_CHECK),
+        id="check_prices",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+    scheduler.add_job(
+        farm_airdrops,
+        CronTrigger.from_crontab(settings.CRON_AIRDROP),
+        id="farm_airdrops",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        check_gas_balances,
+        CronTrigger.from_crontab("0 */2 * * *"),  # every 2 hours
+        id="check_gas_balances",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        self_heal,
+        CronTrigger.from_crontab("*/30 * * * *"),  # every 30 minutes
+        id="self_heal",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+
+    scheduler.start()
+    logger.info(
+        "Scheduler started — bounty=%s price=%s airdrop=%s",
+        settings.CRON_BOUNTY_SCAN,
+        settings.CRON_PRICE_CHECK,
+        settings.CRON_AIRDROP,
+    )
+
+
+# ---------------------------------------------------------------------------
+# App lifecycle
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup / shutdown."""
+    # ---- Startup ---------------------------------------------------------
+    missing = settings.validate()
+    if missing:
+        logger.warning("Missing config values: %s", ", ".join(missing))
+    else:
+        logger.info("All critical config values present")
+
+    init_db(settings.DATABASE_URL)
+    logger.info("Database initialised: %s", settings.DATABASE_URL)
+
+    # ---- Seed initial wallets (if SEED_PHRASE is configured) -------------
+    try:
+        db = next(get_session())
+        existing = db.query(Wallet).count()
+        if existing == 0 and settings.SEED_PHRASE:
+            logger.info("Seeding initial wallets...")
+            # Create 1 hot wallet per chain + 1 disposable for airdrops
+            for chain in ["ethereum", "base", "arbitrum", "polygon", "bsc"]:
+                sync_wallet_to_db(db, index=0, chain=chain)
+            sync_wallet_to_db(db, index=1, chain="ethereum", wallet_type="disposable")
+            logger.info("Seeded %d wallets from seed phrase", db.query(Wallet).count())
+        db.close()
+    except ValueError:
+        logger.info("No SEED_PHRASE configured — skipping wallet seeding")
+    except Exception as exc:
+        logger.warning("Wallet seeding skipped: %s", exc)
+
+    start_scheduler()
+    yield
+
+    # ---- Shutdown --------------------------------------------------------
+    scheduler.shutdown(wait=False)
+    logger.info("Scheduler stopped")
+    zero_keyring()
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="BuckGen",
+    version="0.1.0",
+    description="Minimal Environment for Resource-Acquiring Agent",
+    lifespan=lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/health")
+async def health():
+    """Liveness check."""
+    return {"status": "ok", "scheduler_running": scheduler.running}
+
+
+@app.get("/config")
+async def config_dump():
+    """Expose non-sensitive config for debugging."""
+    return {
+        "db_url": settings.DATABASE_URL,
+        "cron_bounty": settings.CRON_BOUNTY_SCAN,
+        "cron_price": settings.CRON_PRICE_CHECK,
+        "cron_airdrop": settings.CRON_AIRDROP,
+        "daily_gas_cap_eur": settings.DAILY_GAS_CAP_EUR,
+        "stop_loss_eur": settings.STOP_LOSS_EUR,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Wallet endpoints
+# ---------------------------------------------------------------------------
+@app.get("/wallets")
+async def list_wallets():
+    """List all active wallets (public addresses only)."""
+    db = next(get_session())
+    try:
+        wallets = db.query(Wallet).filter(Wallet.is_active == True).all()
+        return {
+            "count": len(wallets),
+            "wallets": [
+                {
+                    "address": w.address,
+                    "chain": w.chain,
+                    "wallet_type": w.wallet_type.value,
+                    "derivation_path": w.derivation_path,
+                    "balance_wei": w.balance_wei,
+                    "is_active": w.is_active,
+                    "last_used": w.last_used_at.isoformat() if w.last_used_at else None,
+                }
+                for w in wallets
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.get("/wallets/{address}/balance")
+async def wallet_balance(address: str, chain: str = "ethereum"):
+    """Check live balance for a wallet address on a given chain."""
+    from app.modules.rpc import get_balance as rpc_balance
+
+    bal = rpc_balance(address, chain)
+    return {
+        "address": address,
+        "chain": chain,
+        "balance_wei": bal.balance_wei,
+        "balance": bal.balance_eth,
+        "symbol": bal.symbol,
+        "has_gas": bal.has_gas,
+        "error": bal.error,
+    }
+
+
+@app.get("/wallets/{address}/balances")
+async def wallet_balances_multi(address: str):
+    """Check balance across ALL chains for one address."""
+    from app.modules.rpc import get_balances_multi
+
+    return get_balances_multi(address)
+
+
+@app.get("/chains")
+async def chains_status():
+    """Health + gas info for all configured chains."""
+    return rpc_summary()
+
+
+# ---------------------------------------------------------------------------
+# Airdrop endpoints
+# ---------------------------------------------------------------------------
+@app.get("/airdrops/discover")
+async def airdrop_discover():
+    """Scan GitHub for airdrop/testnet opportunities."""
+    from app.modules.airdrop import discover_airdrops
+
+    opportunities = await discover_airdrops(max_results=10)
+    return {
+        "count": len(opportunities),
+        "opportunities": [
+            {
+                "title": o.title,
+                "url": o.url,
+                "source": o.source,
+                "chains": o.chains,
+                "score": o.score,
+                "reward_tokens": o.reward_tokens,
+                "requires_tasks": o.requires_tasks,
+            }
+            for o in opportunities
+        ],
+    }
+
+
+@app.post("/airdrops/farm")
+async def airdrop_farm():
+    """Run the full airdrop farming cycle manually."""
+    from app.modules.airdrop import farm_opportunities
+
+    db = next(get_session())
+    try:
+        result = await farm_opportunities(db)
+        return {
+            "status": "ok",
+            "summary": {
+                "airdrops_discovered": result["airdrops_discovered"],
+                "wallets_created": result["wallets_created"],
+                "faucet_claims_attempted": result["faucet_claims_attempted"],
+                "faucet_claims_succeeded": result["faucet_claims_succeeded"],
+                "registrations": result["registrations"],
+            },
+            "errors": result["errors"],
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Price & Arbitrage endpoints
+# ---------------------------------------------------------------------------
+@app.get("/prices/tickers")
+async def prices_tickers():
+    """Fetch live tickers from all exchanges for default pairs."""
+    from app.modules.prices import fetch_all_tickers
+
+    tickers = fetch_all_tickers()
+    return {
+        "count": sum(len(ts) for ts in tickers.values()),
+        "pairs": {
+            pair: [
+                {
+                    "exchange": t.exchange,
+                    "bid": t.bid,
+                    "ask": t.ask,
+                    "last": t.last,
+                    "volume": t.volume,
+                    "error": t.error,
+                }
+                for t in tickers_list
+            ]
+            for pair, tickers_list in tickers.items()
+        },
+    }
+
+
+@app.get("/prices/coingecko")
+async def prices_coingecko():
+    """Fetch reference prices from CoinGecko."""
+    from app.modules.prices import fetch_all_coingecko
+
+    prices = await fetch_all_coingecko()
+    return {
+        "count": len(prices),
+        "prices": {
+            sym: {
+                "usd": p.usd,
+                "usd_24h_change": p.usd_24h_change,
+                "usd_market_cap": p.usd_market_cap,
+                "error": p.error,
+            }
+            for sym, p in prices.items()
+        },
+    }
+
+
+@app.get("/prices/arbitrage")
+async def prices_arbitrage(capital: float = 100.0):
+    """Detect arbitrage opportunities across all tracked pairs/exchanges."""
+    from app.modules.prices import check_all_prices
+
+    result = await check_all_prices(capital_eur=capital)
+    return {
+        "summary": {
+            "pairs_checked": result["pairs_checked"],
+            "exchanges_checked": result["exchanges_checked"],
+            "tickers_fetched": result["tickers_fetched"],
+            "opportunities_found": result["arbitrage_opportunities"],
+        },
+        "top_opportunities": result["top_opportunities"],
+        "errors": result["errors"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trade execution (DeFi)
+# ---------------------------------------------------------------------------
+@app.post("/trade/swap")
+async def trade_swap(
+    chain: str = "ethereum",
+    wallet_index: int = 0,
+    from_token: str = "",
+    to_token: str = "",
+    amount_wei: str = "",
+    amount_eur: float = 0.0,
+):
+    """
+    Execute a token swap via 1inch using the agent's HD wallet.
+
+    For safety, defaults to dry-run mode.
+    Set confirm=true to actually submit.
+    """
+    from app.modules.defi import execute_swap
+
+    db = next(get_session())
+    try:
+        result = await execute_swap(
+            db=db,
+            chain=chain,
+            wallet_index=wallet_index,
+            from_token=from_token,
+            to_token=to_token,
+            amount_wei=amount_wei,
+            amount_eur_estimate=amount_eur,
+        )
+        return {
+            "success": result.success,
+            "tx_hash": result.tx_hash,
+            "chain": chain,
+            "from_amount": result.from_amount,
+            "to_amount": result.to_amount,
+            "gas_used_wei": result.gas_used_wei,
+            "error": result.error,
+        }
+    finally:
+        db.close()
+
+
+@app.post("/trade/arbitrage")
+async def trade_arbitrage(chain: str = "ethereum", capital_eur: float = 100.0):
+    """
+    Execute the best detected arbitrage opportunity on a given chain.
+    """
+    from app.modules.defi import execute_arbitrage
+    from app.modules.prices import check_all_prices
+
+    # First check for opportunities
+    price_result = await check_all_prices(capital_eur=capital_eur)
+    opportunities = price_result.get("top_opportunities", [])
+
+    if not opportunities:
+        return {"success": False, "error": "No arbitrage opportunities detected"}
+
+    db = next(get_session())
+    try:
+        result = await execute_arbitrage(
+            db=db,
+            chain=chain,
+            opportunity=opportunities[0],
+            capital_eur=capital_eur,
+        )
+        return result
+    finally:
+        db.close()
+
+
+@app.get("/trade/quote")
+async def trade_quote(
+    chain: str = "ethereum",
+    from_token: str = "",
+    to_token: str = "",
+    amount_wei: str = "",
+):
+    """Get a quote from 1inch without executing."""
+    from app.modules.defi import get_swap_quote
+
+    quote = await get_swap_quote(chain, from_token, to_token, amount_wei)
+    if not quote:
+        return {"success": False, "error": "Failed to get quote"}
+    return {
+        "success": True,
+        "from_amount": quote.from_amount,
+        "to_amount": quote.to_amount,
+        "estimated_gas": quote.estimated_gas,
+        "price_impact": quote.price_impact,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bounty submission (auto-submit via LLM + GitHub API)
+# ---------------------------------------------------------------------------
+@app.get("/bounties/top")
+async def bounties_top(min_score: float = 0.7, limit: int = 5):
+    """View top-scoring open bounties available for submission."""
+    db = next(get_session())
+    try:
+        top = (
+            db.query(Bounty)
+            .filter(Bounty.status == BountyStatus.OPEN, Bounty.score >= min_score)
+            .order_by(Bounty.score.desc())
+            .limit(limit)
+            .all()
+        )
+        return {
+            "count": len(top),
+            "bounties": [
+                {
+                    "id": b.id,
+                    "title": b.title[:80],
+                    "reward": b.reward_amount,
+                    "currency": b.reward_currency,
+                    "score": b.score,
+                    "url": b.url,
+                }
+                for b in top
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.post("/bounties/submit/{bounty_id}")
+async def bounties_submit(bounty_id: int):
+    """Generate a solution and post a comment on a specific bounty issue."""
+    from app.modules.submit_bounty import submit_bounty
+
+    db = next(get_session())
+    try:
+        result = await submit_bounty(db, bounty_id)
+        return result
+    finally:
+        db.close()
+
+
+@app.post("/bounties/submit-top")
+async def bounties_submit_top(max_subs: int = 3, min_score: float = 0.7):
+    """Auto-submit solutions for the highest-scoring open bounties."""
+    from app.modules.submit_bounty import submit_top_bounties
+
+    db = next(get_session())
+    try:
+        results = await submit_top_bounties(db, max_subs, min_score)
+        return {"submissions": len(results), "results": results}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# On-chain task automation (testnet airdrop farming)
+# ---------------------------------------------------------------------------
+@app.post("/tasks/self-transfer")
+async def tasks_self_transfer(chain: str = "sepolia", wallet_index: int = 10):
+    """Send a small self-transfer on testnet for airdrop eligibility."""
+    from app.modules.zksync_era import send_self_transfer
+
+    db = next(get_session())
+    try:
+        result = await send_self_transfer(db, chain, wallet_index)
+        return result
+    finally:
+        db.close()
+
+
+@app.post("/tasks/deploy")
+async def tasks_deploy(chain: str = "sepolia", wallet_index: int = 10):
+    """Deploy a test contract on testnet for airdrop eligibility."""
+    from app.modules.zksync_era import deploy_test_contract
+
+    db = next(get_session())
+    try:
+        result = await deploy_test_contract(db, chain, wallet_index)
+        return result
+    finally:
+        db.close()
+
+
+@app.post("/tasks/run-all")
+async def tasks_run_all(wallet_index: int = 10):
+    """Run all on-chain tasks on all testnets."""
+    from app.modules.zksync_era import run_all_testnets
+
+    db = next(get_session())
+    try:
+        results = await run_all_testnets(db, wallet_index)
+        return {"chains": len(results), "results": results}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Revenue / P&L tracking
+# ---------------------------------------------------------------------------
+@app.post("/bounties/{bounty_id}/mark-paid")
+async def bounties_mark_paid(bounty_id: int, actual_reward: float | None = None):
+    """Mark a bounty as PAID and record the revenue."""
+    from app.utils.pnl import record_revenue
+
+    db = next(get_session())
+    try:
+        bounty = db.query(Bounty).filter(Bounty.id == bounty_id).first()
+        if not bounty:
+            return {"success": False, "error": "Bounty not found"}
+
+        reward = actual_reward or bounty.reward_amount or 0
+        bounty.status = BountyStatus.PAID
+        bounty.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        if reward > 0:
+            record_revenue(
+                db,
+                "bounties",
+                reward,
+                currency=bounty.reward_currency,
+                source=bounty.url,
+                memo=f"Bounty #{bounty.id}: {bounty.title[:60]}",
+            )
+
+        return {
+            "success": True,
+            "bounty_id": bounty.id,
+            "reward_eur": reward,
+            "revenue_recorded": reward > 0,
+        }
+    finally:
+        db.close()
+
+
+@app.get("/revenue/summary")
+async def revenue_summary(hours: int = 0):
+    """P&L summary across all modules."""
+    from app.utils.pnl import pnl_summary
+
+    db = next(get_session())
+    try:
+        summary = pnl_summary(db, hours=hours if hours > 0 else None)
+        return summary
+    finally:
+        db.close()
+
+
+@app.get("/revenue/module/{module}")
+async def revenue_module(module: str, hours: int = 0):
+    """P&L for a specific module."""
+    from app.utils.pnl import module_pnl
+
+    valid = {"bounties", "arbitrage", "airdrops", "tasks", "defi"}
+    if module not in valid:
+        return {"error": f"Invalid module. Choose from: {', '.join(sorted(valid))}"}
+
+    db = next(get_session())
+    try:
+        pnl = module_pnl(db, module, hours=hours if hours > 0 else None)
+        return pnl
+    finally:
+        db.close()
+
+
+@app.get("/prices/history/{pair:path}")
+async def prices_history(pair: str, exchange: str = "", hours: int = 24):
+    """Query price history for a trading pair (trend/volatility analysis)."""
+    from app.modules.prices import get_price_history
+
+    db = next(get_session())
+    try:
+        history = get_price_history(
+            db,
+            pair=pair.upper(),
+            exchange=exchange if exchange else None,
+            hours=hours,
+        )
+        return {
+            "pair": pair.upper(),
+            "exchange": exchange or "all",
+            "hours": hours,
+            "count": len(history),
+            "snapshots": history,
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Web dashboard
+# ---------------------------------------------------------------------------
+@app.get("/dashboard", include_in_schema=False)
+async def web_dashboard():
+    """
+    Serves a browser-based monitoring dashboard for the BuckGen agent.
+    All data is fetched client-side from the JSON API endpoints.
+    """
+    html = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BuckGen — Agent Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #0d1117; color: #c9d1d9; padding: 20px; }
+  .container { max-width: 1400px; margin: 0 auto; }
+  h1 { color: #58a6ff; font-size: 1.5rem; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; }
+  h1 small { font-size: 0.8rem; color: #8b949e; font-weight: normal; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+  .card h3 { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .card .value { font-size: 1.8rem; font-weight: 600; color: #f0f6fc; }
+  .card .sub { font-size: 0.8rem; color: #8b949e; margin-top: 4px; }
+  .status-ok { color: #3fb950; }
+  .status-degraded { color: #d29922; }
+  .status-down, .status-circuit_open { color: #f85149; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #21262d; font-size: 0.85rem; }
+  th { color: #8b949e; font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 500; }
+  .badge-ok { background: #1b3820; color: #3fb950; }
+  .badge-degraded { background: #3d2e00; color: #d29922; }
+  .badge-down { background: #3d1111; color: #f85149; }
+  .refresh-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; }
+  .refresh-bar button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+    padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+  .refresh-bar button:hover { background: #30363d; }
+  .refresh-bar span { color: #8b949e; font-size: 0.8rem; }
+  .flex-row { display: flex; gap: 20px; flex-wrap: wrap; }
+  .flex-row > * { flex: 1; min-width: 300px; }
+  .error-msg { color: #f85149; font-size: 0.8rem; padding: 4px 0; }
+  .chart-container { height: 200px; position: relative; }
+  .bar { display: inline-block; background: #58a6ff; border-radius: 2px; margin-right: 2px; }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>BuckGen <small>Resource-Acquiring Agent</small></h1>
+  <div class="refresh-bar">
+    <button onclick="fetchAll()">Refresh Now</button>
+    <span id="lastUpdate">Loading...</span>
+  </div>
+  <div class="grid" id="summaryCards"></div>
+    <div class="flex-row">
+      <div class="card" style="flex:2">
+        <h3>Modules</h3>
+        <table><thead><tr><th>Module</th><th>Status</th><th>Errors</th><th>Last OK</th><th>Last Error</th></tr></thead>
+        <tbody id="moduleRows"></tbody></table>
+      </div>
+      <div class="card" style="flex:1">
+        <h3>Chains</h3>
+        <table><thead><tr><th>Chain</th><th>Block</th><th>Gas</th></tr></thead>
+        <tbody id="chainRows"></tbody></table>
+      </div>
+    </div>
+    <div class="flex-row">
+      <div class="card" style="flex:1">
+        <h3>P&amp;L by Module</h3>
+        <table><thead><tr><th>Module</th><th>Revenue</th><th>Spend</th><th>Profit</th><th>ROI</th></tr></thead>
+        <tbody id="pnlRows"></tbody></table>
+      </div>
+      <div class="card" style="flex:1">
+        <h3>Top Revenue Sources</h3>
+        <table><thead><tr><th>Source</th><th>Amount</th><th>Module</th></tr></thead>
+        <tbody id="topRevenueRows"></tbody></table>
+      </div>
+    </div>
+    <div class="flex-row">
+      <div class="card" style="flex:1">
+        <h3>Prices</h3>
+        <table><thead><tr><th>Pair</th><th>Exchange</th><th>Bid</th><th>Ask</th><th>Last</th></tr></thead>
+        <tbody id="priceRows"></tbody></table>
+      </div>
+      <div class="card" style="flex:1">
+        <h3>Arbitrage Opportunities</h3>
+        <table><thead><tr><th>Pair</th><th>Buy</th><th>Sell</th><th>Net %</th><th>EUR</th></tr></thead>
+        <tbody id="arbRows"></tbody></table>
+      </div>
+    </div>
+</div>
+<script>
+let autoRefresh = null;
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+function statusBadge(s) {
+  const cls = s === 'ok' ? 'ok' : s === 'degraded' ? 'degraded' : 'down';
+  return `<span class="badge badge-${cls}">${s}</span>`;
+}
+function ago(ts) {
+  if (!ts || ts === 'never') return 'never';
+  const m = ts.match(/(\d+)([smh])/);
+  if (!m) return ts;
+  return m[1] + m[2] + ' ago';
+}
+async function fetchAll() {
+  const now = new Date().toLocaleTimeString();
+  document.getElementById('lastUpdate').textContent = 'Last: ' + now;
+  try {
+    // Summary cards
+    const status = await fetchJSON('/system/status');
+    document.getElementById('summaryCards').innerHTML = [
+      { label: 'Uptime', value: status.uptime_human, sub: 'since ' + new Date(status.started_at).toLocaleString() },
+      { label: 'Modules OK', value: status.modules_ok + '/' + status.modules_total,
+        sub: status.modules_degraded + ' degraded, ' + status.modules_down + ' down',
+        cls: status.modules_down > 0 ? 'status-down' : status.modules_degraded > 0 ? 'status-degraded' : 'status-ok' },
+      { label: 'Errors (1h)', value: status.errors_last_hour,
+        sub: 'last 60 minutes', cls: status.errors_last_hour > 0 ? 'status-down' : 'status-ok' },
+      { label: 'Chains', value: status.chains_connected + '/' + status.chains_total,
+        sub: 'RPC endpoints connected', cls: status.chains_connected === status.chains_total ? 'status-ok' : 'status-degraded' },
+      { label: 'Scheduler', value: status.scheduler_running ? 'Running' : 'Stopped',
+        sub: status.scheduler_running ? '5 jobs registered' : 'Check logs',
+        cls: status.scheduler_running ? 'status-ok' : 'status-down' },
+    ].map(c => `<div class="card"><h3>${c.label}</h3><div class="value ${c.cls || ''}">${c.value}</div><div class="sub">${c.sub}</div></div>`).join('');
+
+    // Module rows
+    const health = await fetchJSON('/system/health');
+    document.getElementById('moduleRows').innerHTML = health.modules.map(m =>
+      `<tr><td>${m.name}</td><td>${statusBadge(m.status)}</td><td>${m.total_errors}</td><td>${ago(m.last_success_ago)}</td><td class="error-msg">${m.last_error_msg || ago(m.last_error_ago)}</td></tr>`
+    ).join('');
+
+    // Chain rows
+    const chains = await fetchJSON('/chains');
+    document.getElementById('chainRows').innerHTML = Object.entries(chains).map(([name, c]) =>
+      `<tr><td>${name}</td><td>${c.connected ? c.block.toLocaleString() : '-'}</td><td>${c.connected ? c.gas_price_gwei + ' gwei' : 'down'}</td></tr>`
+    ).join('');
+
+    // Price rows
+    const prices = await fetchJSON('/prices/tickers');
+    document.getElementById('priceRows').innerHTML = Object.entries(prices.pairs).flatMap(([pair, ex]) =>
+      ex.map(t => `<tr><td>${pair}</td><td>${t.exchange}</td><td>$${t.bid.toFixed(2)}</td><td>$${t.ask.toFixed(2)}</td><td>$${t.last.toFixed(2)}</td></tr>`)
+    ).join('');
+
+    // Arb rows (if any)
+    const arb = await fetchJSON('/prices/arbitrage?capital=500');
+    document.getElementById('arbRows').innerHTML = arb.top_opportunities.length
+      ? arb.top_opportunities.map(o =>
+          `<tr><td>${o.pair}</td><td>${o.buy_at} @ $${o.buy_price}</td><td>${o.sell_at} @ $${o.sell_price}</td><td>${o.net_profit_pct}%</td><td>EUR ${o.estimated_profit_eur}</td></tr>`
+        ).join('')
+      : '<tr><td colspan="5" style="text-align:center;color:#8b949e;">No arbitrage opportunities detected (markets are efficient)</td></tr>';
+
+    // P&L rows
+    const pnl = await fetchJSON('/revenue/summary');
+    document.getElementById('pnlRows').innerHTML = pnl.per_module.map(m =>
+      `<tr>
+        <td>${m.module}</td>
+        <td style="color:#3fb950;">EUR ${m.revenue_eur.toFixed(2)}</td>
+        <td style="color:#f85149;">EUR ${m.spend_eur.toFixed(2)}</td>
+        <td style="color:${m.profit_eur >= 0 ? '#3fb950' : '#f85149'};">EUR ${m.profit_eur.toFixed(2)}</td>
+        <td style="color:${m.roi_pct >= 0 ? '#3fb950' : '#f85149'};">${m.roi_pct}%</td>
+      </tr>`
+    ).join('') + `
+      <tr style="font-weight:bold; border-top: 2px solid #30363d;">
+        <td>TOTAL</td>
+        <td style="color:#3fb950;">EUR ${pnl.total_revenue_eur.toFixed(2)}</td>
+        <td style="color:#f85149;">EUR ${pnl.total_spend_eur.toFixed(2)}</td>
+        <td style="color:${pnl.total_profit_eur >= 0 ? '#3fb950' : '#f85149'};">EUR ${pnl.total_profit_eur.toFixed(2)}</td>
+        <td style="color:${pnl.total_roi_pct >= 0 ? '#3fb950' : '#f85149'};">${pnl.total_roi_pct}%</td>
+      </tr>`;
+
+    // Top revenue sources
+    document.getElementById('topRevenueRows').innerHTML = pnl.top_sources.length
+      ? pnl.top_sources.map(s =>
+          `<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${s.source}</td><td style="color:#3fb950;">EUR ${s.amount_eur.toFixed(2)}</td><td>${s.module}</td></tr>`
+        ).join('')
+      : '<tr><td colspan="3" style="text-align:center;color:#8b949e;">No revenue recorded yet</td></tr>';
+  } catch (e) {
+    document.getElementById('lastUpdate').textContent = 'Error: ' + e.message;
+  }
+}
+// Auto-refresh every 30s
+fetchAll();
+setInterval(fetchAll, 30000);
+</script>
+</body>
+</html>"""
+    from fastapi.responses import HTMLResponse
+
+    return HTMLResponse(content=html)
+
+
+# ---------------------------------------------------------------------------
+# System monitoring endpoints
+# ---------------------------------------------------------------------------
+@app.get("/system/health")
+async def system_health():
+    """Detailed system health — per-module status, uptime, error counts."""
+    return monitor.get_detailed()
+
+
+@app.get("/system/status")
+async def system_status():
+    """High-level system status summary."""
+    summary = monitor.get_summary()
+    summary["scheduler_running"] = scheduler.running
+
+    # Add RPC status
+    from app.modules.rpc import check_all_chains
+
+    chains = check_all_chains()
+    summary["chains_connected"] = sum(1 for c in chains.values() if c.connected)
+    summary["chains_total"] = len(chains)
+    return summary
+
+
+@app.post("/system/reset/{module_name}")
+async def system_reset(module_name: str):
+    """Manually reset a module's circuit breaker."""
+    ok = monitor.reset_module(module_name)
+    if not ok:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=f"Unknown module: {module_name}")
+    return {"status": "reset", "module": module_name}
+
+
+@app.post("/system/recover")
+async def system_recover():
+    """Attempt to recover all degraded modules."""
+    results = await monitor.recover_all()
+    return {"status": "ok", "recovery_results": results}

@@ -1,0 +1,10 @@
+APScheduler==3.10.4
+ccxt==4.5.63
+cryptography==44.0.0
+eth-account==0.13.7
+fastapi==0.115.0
+httpx==0.28.1
+python-dotenv==1.0.1
+SQLAlchemy==2.0.35
+uvicorn==0.30.0
+web3==7.8.0

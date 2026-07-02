@@ -1,0 +1,60 @@
+# =============================================================================
+# BuckGen — Render Blueprint
+# Deploy:  render.yaml -> manual 'Deploy from Blueprint' on Render Dashboard
+# Pricing: Free tier (web service + persisted disk)
+# =============================================================================
+
+services:
+  - type: web
+    name: buckgen
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:///data/buckgen.db
+      - key: DEBUG
+        value: "false"
+      - key: DAILY_GAS_CAP_EUR
+        value: "50.0"
+      - key: STOP_LOSS_EUR
+        value: "500.0"
+      - key: CRON_BOUNTY_SCAN
+        value: "0 */2 * * *"
+      - key: CRON_PRICE_CHECK
+        value: "*/30 * * * *"
+      - key: CRON_AIRDROP
+        value: "0 */3 * * *"
+      - key: ETH_RPC_URL
+        sync: false
+      - key: BASE_RPC_URL
+        sync: false
+      - key: ARBITRUM_RPC_URL
+        sync: false
+      - key: POLYGON_RPC_URL
+        sync: false
+      - key: BSC_RPC_URL
+        sync: false
+      - key: SEED_PHRASE
+        sync: false
+      - key: BUCK_ENC_PASSWORD
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_SECRET
+        sync: false
+      - key: OLLAMA_BASE_URL
+        sync: false
+      - key: OLLAMA_MODEL
+        value: "qwen2.5:7b"
+    disk:
+      name: buckgen-data
+      mountPath: /app/data
+      sizeGB: 1

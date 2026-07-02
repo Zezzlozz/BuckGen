@@ -1,0 +1,118 @@
+"""
+Application configuration loader.
+Secrets are loaded from environment variables (or .env file).
+Seed phrase is optionally encrypted with AES-256-GCM and decrypted at runtime.
+"""
+
+import os
+import sys
+from pathlib import Path
+from dotenv import load_dotenv
+
+from app.utils.crypto import decrypt_env, encrypt_env
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_FILE = BASE_DIR / ".env"
+ENV_ENCRYPTED_FILE = BASE_DIR / ".env.encrypted"
+
+# ---------------------------------------------------------------------------
+# Load plain-text .env if it exists (development only)
+# ---------------------------------------------------------------------------
+if ENV_FILE.exists():
+    load_dotenv(ENV_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Configuration holder
+# ---------------------------------------------------------------------------
+class Settings:
+    """Immutable settings populated from env at startup."""
+
+    def __init__(self):
+        # -- Encryption password for .env.encrypted -------------------------
+        self._enc_password: str | None = os.getenv("BUCK_ENC_PASSWORD")
+
+        # -- Seed phrase (encrypted or plain) -------------------------------
+        raw_seed = os.getenv("SEED_PHRASE", "")
+        if self._enc_password and raw_seed.startswith("buck_enc:"):
+            # encrypted payload — decrypt at runtime
+            payload = raw_seed.removeprefix("buck_enc:")
+            self.SEED_PHRASE: str = decrypt_env(payload, self._enc_password)
+        else:
+            self.SEED_PHRASE: str = raw_seed
+
+        # -- GitHub token (for bounty search, 5000 req/hr vs 60 unauthed) ---
+        self.GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
+
+        # -- Exchange API keys (read-only permissions) ----------------------
+        self.BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
+        self.BINANCE_SECRET: str = os.getenv("BINANCE_SECRET", "")
+
+        # -- RPC endpoints (publicnode.com is free, no API key needed) -------
+        self.ETH_RPC_URL: str = os.getenv(
+            "ETH_RPC_URL", "https://ethereum.publicnode.com"
+        )
+        self.BASE_RPC_URL: str = os.getenv(
+            "BASE_RPC_URL", "https://base.publicnode.com"
+        )
+        self.ARBITRUM_RPC_URL: str = os.getenv(
+            "ARBITRUM_RPC_URL", "https://arbitrum.publicnode.com"
+        )
+        self.POLYGON_RPC_URL: str = os.getenv(
+            "POLYGON_RPC_URL", "https://polygon-bor.publicnode.com"
+        )
+        self.BSC_RPC_URL: str = os.getenv("BSC_RPC_URL", "https://bsc.publicnode.com")
+
+        # -- Telegram alerts -------------------------------------------------
+        self.TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+        # -- Budget ---------------------------------------------------------
+        self.DAILY_GAS_CAP_EUR: float = float(os.getenv("DAILY_GAS_CAP_EUR", "50.0"))
+        self.STOP_LOSS_EUR: float = float(os.getenv("STOP_LOSS_EUR", "500.0"))
+
+        # -- Schedules (cron expressions) -----------------------------------
+        self.CRON_BOUNTY_SCAN: str = os.getenv("CRON_BOUNTY_SCAN", "0 */2 * * *")
+        self.CRON_PRICE_CHECK: str = os.getenv("CRON_PRICE_CHECK", "*/30 * * * *")
+        self.CRON_AIRDROP: str = os.getenv("CRON_AIRDROP", "0 */3 * * *")
+
+        # -- Database -------------------------------------------------------
+        self.DATABASE_URL: str = os.getenv(
+            "DATABASE_URL",
+            f"sqlite:///{BASE_DIR / 'data' / 'buckgen.db'}",
+        )
+
+        # -- LLM ------------------------------------------------------------
+        self.OLLAMA_BASE_URL: str = os.getenv(
+            "OLLAMA_BASE_URL", "http://localhost:11434"
+        )
+        self.OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+
+        # -- Debug ----------------------------------------------------------
+        self.DEBUG: bool = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def encrypt_seed(self, password: str) -> str:
+        """Return 'buck_enc:<payload>' for use in .env.encrypted."""
+        payload = encrypt_env(self.SEED_PHRASE, password)
+        return f"buck_enc:{payload}"
+
+    def validate(self) -> list[str]:
+        """Return list of missing critical settings."""
+        missing = []
+        if not self.SEED_PHRASE:
+            missing.append("SEED_PHRASE")
+        if not self.ETH_RPC_URL:
+            missing.append("ETH_RPC_URL")
+        return missing
+
+
+# ---------------------------------------------------------------------------
+# Global singleton
+# ---------------------------------------------------------------------------
+settings = Settings()
