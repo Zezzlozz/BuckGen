@@ -8,10 +8,8 @@ All use publicnode.com free endpoints by default (configurable in .env).
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Optional
+
 from web3 import Web3
-from web3.types import Wei
-from web3.exceptions import Web3RPCError, TimeExhausted
 
 from app.config import settings
 from app.modules.wallet import CHAIN_CONFIGS
@@ -60,7 +58,7 @@ _RPC_URLS: dict[str, str] = {
 }
 
 
-def get_web3(chain: str) -> Optional[Web3]:
+def get_web3(chain: str) -> Web3 | None:
     """Get (or create) a cached Web3 connection for the given chain."""
     if chain in _w3_cache:
         return _w3_cache[chain]
@@ -274,7 +272,7 @@ def summary() -> dict:
             try:
                 k, v = f.result()
                 result[k] = v
-            except Exception as exc:
+            except Exception:
                 pass
 
     return result

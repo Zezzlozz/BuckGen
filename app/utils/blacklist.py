@@ -4,6 +4,7 @@ on sources that don't pay reliably.
 """
 
 from sqlalchemy.orm import Session
+
 from app.db.models import BlacklistEntry
 
 

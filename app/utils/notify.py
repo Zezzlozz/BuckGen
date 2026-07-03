@@ -28,7 +28,11 @@ async def send_telegram(message: str, parse_mode: str = "Markdown") -> bool:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             return True

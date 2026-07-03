@@ -3,6 +3,7 @@ Test HD wallet derivation + RPC balance checking.
 Run:  python tests\test_wallet_rpc.py
 """
 
+import os
 import sys
 from pathlib import Path
 

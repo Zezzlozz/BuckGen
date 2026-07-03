@@ -3,7 +3,6 @@ LLM bounty scorer.
 Tries local Ollama first; falls back to heuristic scoring if unavailable.
 """
 
-import json
 import logging
 import re
 from typing import Any
@@ -80,7 +79,11 @@ async def _score_with_llm(bounty: dict[str, Any]) -> float | None:
             "stream": False,
             "options": {"temperature": 0.1, "num_predict": 32},
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(
+            timeout=30.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
             resp = await client.post(
                 f"{settings.OLLAMA_BASE_URL}/api/generate",
                 json=payload,

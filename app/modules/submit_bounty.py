@@ -14,16 +14,15 @@ Requirements:
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.models import Bounty, BountyStatus
-from app.utils.notify import notify_alert, notify_error
 from app.utils.budget import can_spend, record_spend
+from app.utils.notify import notify_alert
 
 logger = logging.getLogger("buckgen.submit")
 
@@ -75,7 +74,11 @@ async def generate_solution(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(
+            timeout=90.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
             resp = await client.post(
                 f"{settings.OLLAMA_BASE_URL}/api/generate",
                 json={
@@ -138,7 +141,11 @@ async def _github_request(
 
     for attempt in range(1 + retries):
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(
+                timeout=30.0,
+                headers=settings.http_headers(),
+                proxy=settings.proxy_config(),
+            ) as client:
                 resp = await client.request(
                     method, url, json=json_data, headers=headers
                 )
@@ -331,13 +338,13 @@ async def submit_bounty(
             fork_name = await create_fork(repo)
             if fork_name:
                 # Create a branch name based on issue number
-                branch_name = f"buckgen-solution-{issue_number}-{int(datetime.now(timezone.utc).timestamp())}"
+                branch_name = f"buckgen-solution-{issue_number}-{int(datetime.now(UTC).timestamp())}"
                 pr_created = await create_pull_request(
                     repo, issue_number, branch_name, solution
                 )
 
         bounty.status = BountyStatus.APPLIED
-        bounty.updated_at = datetime.now(timezone.utc)
+        bounty.updated_at = datetime.now(UTC)
         record_spend(db, 0.01, "llm", f"bounty submission #{bounty.id}")
         db.commit()
 

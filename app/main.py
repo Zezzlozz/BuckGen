@@ -5,22 +5,25 @@ Initialises database, scheduler, and exposes health/liveness endpoints.
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
-from fastapi import FastAPI
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.db.models import init_db, get_session, Wallet, Bounty, BountyStatus
-from app.modules.wallet import sync_wallet_to_db, zero_keyring
-from app.modules.rpc import summary as rpc_summary, check_chain
+from app.db.models import Bounty, BountyStatus, Wallet, get_session, init_db
+from app.modules.rpc import summary as rpc_summary
 from app.modules.system import monitor
+from app.modules.wallet import sync_wallet_to_db, zero_keyring
 from app.scheduler.jobs import (
-    scan_bounties,
+    check_gas_balances,
     check_prices,
     farm_airdrops,
-    check_gas_balances,
+    scan_bounties,
     self_heal,
 )
 
@@ -32,6 +35,43 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
 )
 logger = logging.getLogger("buckgen")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _redact_db_url(url: str) -> str:
+    """Remove credentials from a database URL for safe logging."""
+    if url.startswith("sqlite"):
+        return url
+    # postgresql://user:pass@host:port/db -> postgresql://***@host:port/db
+    try:
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(url)
+        if parsed.password:
+            # Replace password with ***
+            netloc = f"{parsed.username}:***@{parsed.hostname}"
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            parsed = parsed._replace(netloc=netloc)
+        return urlunparse(parsed)
+    except Exception:
+        return url
+
+
+def _require_api_key(request: Request) -> None:
+    """Dependency: require X-API-Key header matching settings.API_KEY."""
+    if not settings.API_KEY:
+        return  # No API key configured — allow all requests (dev mode)
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != settings.API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+def _safe_error(msg: str = "Internal server error") -> dict:
+    """Return a sanitized error response."""
+    return {"success": False, "error": msg}
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +145,7 @@ async def lifespan(app: FastAPI):
         logger.info("All critical config values present")
 
     init_db(settings.DATABASE_URL)
-    logger.info("Database initialised: %s", settings.DATABASE_URL)
+    logger.info("Database initialised: %s", _redact_db_url(settings.DATABASE_URL))
 
     # ---- Seed initial wallets (if SEED_PHRASE is configured) -------------
     try:
@@ -143,21 +183,52 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ---------------------------------------------------------------------------
+# CORS — explicitly list allowed origins
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        # Add your Render deployment URL here, e.g.:
+        # "https://buckgen.onrender.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-API-Key", "Content-Type"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler — sanitize error responses
+# ---------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Return sanitized JSON for unhandled exceptions instead of raw tracebacks."""
+    logger.error(
+        "Unhandled exception on %s %s: %s", request.method, request.url.path, exc
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "error": "Internal server error"},
+    )
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 @app.get("/health")
-async def health():
+async def health() -> dict:
     """Liveness check."""
     return {"status": "ok", "scheduler_running": scheduler.running}
 
 
 @app.get("/config")
-async def config_dump():
+async def config_dump() -> dict:
     """Expose non-sensitive config for debugging."""
     return {
-        "db_url": settings.DATABASE_URL,
+        "db_url": _redact_db_url(settings.DATABASE_URL),
         "cron_bounty": settings.CRON_BOUNTY_SCAN,
         "cron_price": settings.CRON_PRICE_CHECK,
         "cron_airdrop": settings.CRON_AIRDROP,
@@ -170,11 +241,11 @@ async def config_dump():
 # Wallet endpoints
 # ---------------------------------------------------------------------------
 @app.get("/wallets")
-async def list_wallets():
+async def list_wallets() -> dict:
     """List all active wallets (public addresses only)."""
     db = next(get_session())
     try:
-        wallets = db.query(Wallet).filter(Wallet.is_active == True).all()
+        wallets = db.query(Wallet).filter(Wallet.is_active).all()
         return {
             "count": len(wallets),
             "wallets": [
@@ -195,7 +266,10 @@ async def list_wallets():
 
 
 @app.get("/wallets/{address}/balance")
-async def wallet_balance(address: str, chain: str = "ethereum"):
+async def wallet_balance(
+    address: str = Path(min_length=40, max_length=44),
+    chain: str = Query(default="ethereum", min_length=2, max_length=20),
+) -> dict:
     """Check live balance for a wallet address on a given chain."""
     from app.modules.rpc import get_balance as rpc_balance
 
@@ -212,7 +286,9 @@ async def wallet_balance(address: str, chain: str = "ethereum"):
 
 
 @app.get("/wallets/{address}/balances")
-async def wallet_balances_multi(address: str):
+async def wallet_balances_multi(
+    address: str = Path(min_length=40, max_length=44),
+) -> dict:
     """Check balance across ALL chains for one address."""
     from app.modules.rpc import get_balances_multi
 
@@ -220,7 +296,7 @@ async def wallet_balances_multi(address: str):
 
 
 @app.get("/chains")
-async def chains_status():
+async def chains_status() -> dict:
     """Health + gas info for all configured chains."""
     return rpc_summary()
 
@@ -229,7 +305,7 @@ async def chains_status():
 # Airdrop endpoints
 # ---------------------------------------------------------------------------
 @app.get("/airdrops/discover")
-async def airdrop_discover():
+async def airdrop_discover() -> dict:
     """Scan GitHub for airdrop/testnet opportunities."""
     from app.modules.airdrop import discover_airdrops
 
@@ -252,7 +328,7 @@ async def airdrop_discover():
 
 
 @app.post("/airdrops/farm")
-async def airdrop_farm():
+async def airdrop_farm(_: None = Depends(_require_api_key)) -> dict:
     """Run the full airdrop farming cycle manually."""
     from app.modules.airdrop import farm_opportunities
 
@@ -278,7 +354,7 @@ async def airdrop_farm():
 # Price & Arbitrage endpoints
 # ---------------------------------------------------------------------------
 @app.get("/prices/tickers")
-async def prices_tickers():
+async def prices_tickers() -> dict:
     """Fetch live tickers from all exchanges for default pairs."""
     from app.modules.prices import fetch_all_tickers
 
@@ -303,7 +379,7 @@ async def prices_tickers():
 
 
 @app.get("/prices/coingecko")
-async def prices_coingecko():
+async def prices_coingecko() -> dict:
     """Fetch reference prices from CoinGecko."""
     from app.modules.prices import fetch_all_coingecko
 
@@ -323,7 +399,9 @@ async def prices_coingecko():
 
 
 @app.get("/prices/arbitrage")
-async def prices_arbitrage(capital: float = 100.0):
+async def prices_arbitrage(
+    capital: float = Query(default=100.0, ge=0.0, le=100000.0),
+) -> dict:
     """Detect arbitrage opportunities across all tracked pairs/exchanges."""
     from app.modules.prices import check_all_prices
 
@@ -345,13 +423,14 @@ async def prices_arbitrage(capital: float = 100.0):
 # ---------------------------------------------------------------------------
 @app.post("/trade/swap")
 async def trade_swap(
-    chain: str = "ethereum",
-    wallet_index: int = 0,
-    from_token: str = "",
-    to_token: str = "",
-    amount_wei: str = "",
-    amount_eur: float = 0.0,
-):
+    _: None = Depends(_require_api_key),
+    chain: str = Query(default="ethereum", min_length=2, max_length=20),
+    wallet_index: int = Query(default=0, ge=0, le=1000),
+    from_token: str = Query(default="", max_length=100),
+    to_token: str = Query(default="", max_length=100),
+    amount_wei: str = Query(default="", max_length=100),
+    amount_eur: float = Query(default=0.0, ge=0.0),
+) -> dict:
     """
     Execute a token swap via 1inch using the agent's HD wallet.
 
@@ -385,7 +464,11 @@ async def trade_swap(
 
 
 @app.post("/trade/arbitrage")
-async def trade_arbitrage(chain: str = "ethereum", capital_eur: float = 500.0):
+async def trade_arbitrage(
+    _: None = Depends(_require_api_key),
+    chain: str = Query(default="ethereum", min_length=2, max_length=20),
+    capital_eur: float = Query(default=500.0, ge=0.0, le=100000.0),
+) -> dict:
     """
     Execute the best detected arbitrage opportunity on a given chain.
     """
@@ -414,11 +497,11 @@ async def trade_arbitrage(chain: str = "ethereum", capital_eur: float = 500.0):
 
 @app.get("/trade/quote")
 async def trade_quote(
-    chain: str = "ethereum",
-    from_token: str = "",
-    to_token: str = "",
-    amount_wei: str = "",
-):
+    chain: str = Query(default="ethereum", min_length=2, max_length=20),
+    from_token: str = Query(default="", max_length=100),
+    to_token: str = Query(default="", max_length=100),
+    amount_wei: str = Query(default="", max_length=100),
+) -> dict:
     """Get a quote from 1inch without executing."""
     from app.modules.defi import get_swap_quote
 
@@ -438,7 +521,10 @@ async def trade_quote(
 # Bounty submission (auto-submit via LLM + GitHub API)
 # ---------------------------------------------------------------------------
 @app.get("/bounties/top")
-async def bounties_top(min_score: float = 0.7, limit: int = 5):
+async def bounties_top(
+    min_score: float = Query(default=0.7, ge=0.0, le=1.0),
+    limit: int = Query(default=5, ge=1, le=100),
+) -> dict:
     """View top-scoring open bounties available for submission."""
     db = next(get_session())
     try:
@@ -468,7 +554,9 @@ async def bounties_top(min_score: float = 0.7, limit: int = 5):
 
 
 @app.post("/bounties/submit/{bounty_id}")
-async def bounties_submit(bounty_id: int):
+async def bounties_submit(
+    _: None = Depends(_require_api_key), bounty_id: int = Path(ge=1)
+) -> dict:
     """Generate a solution and post a comment on a specific bounty issue."""
     from app.modules.submit_bounty import submit_bounty
 
@@ -481,7 +569,11 @@ async def bounties_submit(bounty_id: int):
 
 
 @app.post("/bounties/submit-top")
-async def bounties_submit_top(max_subs: int = 3, min_score: float = 0.7):
+async def bounties_submit_top(
+    _: None = Depends(_require_api_key),
+    max_subs: int = Query(default=3, ge=1, le=20),
+    min_score: float = Query(default=0.7, ge=0.0, le=1.0),
+) -> dict:
     """Auto-submit solutions for the highest-scoring open bounties."""
     from app.modules.submit_bounty import submit_top_bounties
 
@@ -497,7 +589,11 @@ async def bounties_submit_top(max_subs: int = 3, min_score: float = 0.7):
 # On-chain task automation (testnet airdrop farming)
 # ---------------------------------------------------------------------------
 @app.post("/tasks/self-transfer")
-async def tasks_self_transfer(chain: str = "sepolia", wallet_index: int = 10):
+async def tasks_self_transfer(
+    _: None = Depends(_require_api_key),
+    chain: str = Query(default="sepolia", min_length=2, max_length=20),
+    wallet_index: int = Query(default=10, ge=0, le=1000),
+) -> dict:
     """Send a small self-transfer on testnet for airdrop eligibility."""
     from app.modules.zksync_era import send_self_transfer
 
@@ -510,7 +606,11 @@ async def tasks_self_transfer(chain: str = "sepolia", wallet_index: int = 10):
 
 
 @app.post("/tasks/deploy")
-async def tasks_deploy(chain: str = "sepolia", wallet_index: int = 10):
+async def tasks_deploy(
+    _: None = Depends(_require_api_key),
+    chain: str = Query(default="sepolia", min_length=2, max_length=20),
+    wallet_index: int = Query(default=10, ge=0, le=1000),
+) -> dict:
     """Deploy a test contract on testnet for airdrop eligibility."""
     from app.modules.zksync_era import deploy_test_contract
 
@@ -523,7 +623,10 @@ async def tasks_deploy(chain: str = "sepolia", wallet_index: int = 10):
 
 
 @app.post("/tasks/run-all")
-async def tasks_run_all(wallet_index: int = 10):
+async def tasks_run_all(
+    _: None = Depends(_require_api_key),
+    wallet_index: int = Query(default=10, ge=0, le=1000),
+) -> dict:
     """Run all on-chain tasks on all testnets."""
     from app.modules.zksync_era import run_all_testnets
 
@@ -539,7 +642,11 @@ async def tasks_run_all(wallet_index: int = 10):
 # Revenue / P&L tracking
 # ---------------------------------------------------------------------------
 @app.post("/bounties/{bounty_id}/mark-paid")
-async def bounties_mark_paid(bounty_id: int, actual_reward: float | None = None):
+async def bounties_mark_paid(
+    _: None = Depends(_require_api_key),
+    bounty_id: int = Path(ge=1),
+    actual_reward: float | None = None,
+) -> dict:
     """Mark a bounty as PAID and record the revenue."""
     from app.utils.pnl import record_revenue
 
@@ -551,7 +658,7 @@ async def bounties_mark_paid(bounty_id: int, actual_reward: float | None = None)
 
         reward = actual_reward or bounty.reward_amount or 0
         bounty.status = BountyStatus.PAID
-        bounty.updated_at = datetime.now(timezone.utc)
+        bounty.updated_at = datetime.now(UTC)
         db.commit()
 
         if reward > 0:
@@ -575,7 +682,7 @@ async def bounties_mark_paid(bounty_id: int, actual_reward: float | None = None)
 
 
 @app.get("/revenue/summary")
-async def revenue_summary(hours: int = 0):
+async def revenue_summary(hours: int = Query(default=0, ge=0, le=8760)) -> dict:
     """P&L summary across all modules."""
     from app.utils.pnl import pnl_summary
 
@@ -588,7 +695,14 @@ async def revenue_summary(hours: int = 0):
 
 
 @app.get("/revenue/module/{module}")
-async def revenue_module(module: str, hours: int = 0):
+async def revenue_module(
+    module: str = Path(
+        min_length=1,
+        max_length=20,
+        pattern="^(bounties|arbitrage|airdrops|tasks|defi)$",
+    ),
+    hours: int = Query(default=0, ge=0, le=8760),
+) -> dict:
     """P&L for a specific module."""
     from app.utils.pnl import module_pnl
 
@@ -605,7 +719,11 @@ async def revenue_module(module: str, hours: int = 0):
 
 
 @app.get("/prices/history/{pair:path}")
-async def prices_history(pair: str, exchange: str = "", hours: int = 24):
+async def prices_history(
+    pair: str = Path(min_length=1, max_length=50),
+    exchange: str = Query(default="", max_length=30),
+    hours: int = Query(default=24, ge=1, le=720),
+) -> dict:
     """Query price history for a trading pair (trend/volatility analysis)."""
     from app.modules.prices import get_price_history
 
@@ -831,13 +949,13 @@ setInterval(fetchAll, 30000);
 # System monitoring endpoints
 # ---------------------------------------------------------------------------
 @app.get("/system/health")
-async def system_health():
+async def system_health() -> dict:
     """Detailed system health — per-module status, uptime, error counts."""
     return monitor.get_detailed()
 
 
 @app.get("/system/status")
-async def system_status():
+async def system_status() -> dict:
     """High-level system status summary."""
     summary = monitor.get_summary()
     summary["scheduler_running"] = scheduler.running
@@ -852,7 +970,10 @@ async def system_status():
 
 
 @app.post("/system/reset/{module_name}")
-async def system_reset(module_name: str):
+async def system_reset(
+    _: None = Depends(_require_api_key),
+    module_name: str = Path(min_length=1, max_length=50),
+) -> dict:
     """Manually reset a module's circuit breaker."""
     ok = monitor.reset_module(module_name)
     if not ok:
@@ -863,7 +984,7 @@ async def system_reset(module_name: str):
 
 
 @app.post("/system/recover")
-async def system_recover():
+async def system_recover(_: None = Depends(_require_api_key)) -> dict:
     """Attempt to recover all degraded modules."""
     results = await monitor.recover_all()
     return {"status": "ok", "recovery_results": results}

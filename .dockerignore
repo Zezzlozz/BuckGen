@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.env
+.env.encrypted
+
+# Tests (not needed in production)
+tests/
+.pytest_cache/
+.ruff_cache/
+
+# Data / local state
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Secrets
+*.key

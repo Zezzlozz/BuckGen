@@ -6,12 +6,12 @@ Pairs with budget.py (spending tracking) for full ROI calculation.
 """
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import RevenueEntry, BudgetEntry
+from app.db.models import BudgetEntry, RevenueEntry
 
 logger = logging.getLogger("buckgen.pnl")
 
@@ -47,7 +47,7 @@ def record_revenue(
         currency=currency,
         source=source,
         memo=memo,
-        earned_at=datetime.now(timezone.utc),
+        earned_at=datetime.now(UTC),
     )
     db.add(entry)
     db.commit()
@@ -79,7 +79,7 @@ def module_revenue(
     if module:
         query = query.filter(RevenueEntry.module == module)
     if hours:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
         query = query.filter(RevenueEntry.earned_at >= cutoff)
 
     result = query.scalar()
@@ -117,7 +117,7 @@ def module_spend(
         query = query.filter(BudgetEntry.category == category)
 
     if hours:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
         # BudgetEntry.date is YYYY-MM-DD string, so time-based filtering is approximate
         date_cutoff = cutoff.strftime("%Y-%m-%d")
         query = query.filter(BudgetEntry.date >= date_cutoff)
@@ -174,12 +174,14 @@ def pnl_summary(
     per_module = [module_pnl(db, m, hours) for m in modules]
 
     total_rev = sum(m["revenue_eur"] for m in per_module)
-    total_spend = sum(m["spend_eur"] for m in per_module)
+    # Direct total spend (avoids double-counting when multiple modules share
+    # the same budget category, e.g. 'gas' used by arbitrage, airdrops, tasks)
+    total_spend = module_spend(db, None, hours)
 
     # Top revenue sources
     query = db.query(RevenueEntry).order_by(RevenueEntry.amount_eur.desc())
     if hours:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
         query = query.filter(RevenueEntry.earned_at >= cutoff)
     top_sources = query.limit(5).all()
 

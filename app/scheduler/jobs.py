@@ -5,17 +5,15 @@ Each job is a plain async function registered in APScheduler.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
-from app.db.models import get_session, Bounty, BountyPlatform, BountyStatus, Wallet
-from app.modules import gitcoin  # GitHub Issues bounty scanner
+from app.db.models import Bounty, BountyPlatform, BountyStatus, Wallet, get_session
 from app.llm.scorer import score_bounty
-from app.utils.notify import notify_bounty_found, notify_error, notify_alert
-from app.utils.blacklist import is_blacklisted
+from app.modules import gitcoin  # GitHub Issues bounty scanner
 from app.modules.system import monitor
+from app.utils.notify import notify_alert, notify_bounty_found, notify_error
 
 logger = logging.getLogger("buckgen.jobs")
 
@@ -28,7 +26,7 @@ async def scan_bounties() -> None:
     Search GitHub Issues for open bounty-labelled issues.
     Score each with LLM (parallel).  Store in DB, notify on high-value finds.
     """
-    logger.info("[bounty] Scan started at %s", datetime.now(timezone.utc).isoformat())
+    logger.info("[bounty] Scan started at %s", datetime.now(UTC).isoformat())
 
     raw_list = await gitcoin.fetch_open_bounties(max_bounties=200)
     if not raw_list:
@@ -132,18 +130,19 @@ async def check_gas_balances() -> None:
     """
     logger.info(
         "[gas] Balance check started at %s",
-        datetime.now(timezone.utc).isoformat(),
+        datetime.now(UTC).isoformat(),
     )
 
     db: Session = next(get_session())
     try:
-        wallets = db.query(Wallet).filter(Wallet.is_active == True).all()
+        wallets = db.query(Wallet).filter(Wallet.is_active).all()
         if not wallets:
             logger.info("[gas] No active wallets in DB — skipping")
             return
 
-        from app.modules.rpc import get_balance, summary as rpc_summary
         from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from app.modules.rpc import get_balance
 
         low_gas: list[str] = []
         total_balances: dict[str, float] = {}
@@ -172,7 +171,7 @@ async def check_gas_balances() -> None:
 
                     # Update cached balance in DB
                     w.balance_wei = str(bal.balance_wei)
-                    w.last_used_at = datetime.now(timezone.utc)
+                    w.last_used_at = datetime.now(UTC)
                 except Exception as exc:
                     logger.warning(
                         "[gas] Balance check failed for %s: %s", w.address[:10], exc
@@ -181,7 +180,7 @@ async def check_gas_balances() -> None:
         db.commit()
 
         # Build summary
-        lines = [f"*Wallet Balances*"]
+        lines = ["*Wallet Balances*"]
         for chain, total in total_balances.items():
             lines.append(f"  {chain}: {total:.6f}")
         summary = "\n".join(lines)
@@ -213,14 +212,14 @@ async def check_prices() -> None:
     Uses ccxt to poll Binance / Coinbase / Kraken / Bybit + CoinGecko.
     Stores ticker snapshots for trend analysis.
     """
-    logger.info("[price] Check started at %s", datetime.now(timezone.utc).isoformat())
+    logger.info("[price] Check started at %s", datetime.now(UTC).isoformat())
 
     db: Session = next(get_session())
     try:
         from app.modules.prices import (
             check_all_prices,
-            store_ticker_snapshots,
             fetch_all_tickers,
+            store_ticker_snapshots,
         )
 
         result = await check_all_prices(capital_eur=500.0)
@@ -277,6 +276,7 @@ async def check_prices() -> None:
         monitor.record_success("prices")
 
     except Exception as exc:
+        db.rollback()
         logger.error("[price] Check failed: %s", exc)
         await notify_error("price_check", str(exc))
         monitor.record_error("prices", str(exc))
@@ -292,7 +292,7 @@ async def farm_airdrops() -> None:
     Check for new testnet / L2 launch activity.
     Register disposable wallets, claim faucets, complete on-chain tasks.
     """
-    logger.info("[airdrop] Farm started at %s", datetime.now(timezone.utc).isoformat())
+    logger.info("[airdrop] Farm started at %s", datetime.now(UTC).isoformat())
 
     db: Session = next(get_session())
     try:
@@ -326,6 +326,7 @@ async def farm_airdrops() -> None:
         monitor.record_success("airdrops")
 
     except Exception as exc:
+        db.rollback()
         logger.error("[airdrop] Farm failed: %s", exc)
         await notify_error("airdrop_farm", str(exc))
         monitor.record_error("airdrops", str(exc))

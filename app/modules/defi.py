@@ -20,23 +20,20 @@ Security:
 """
 
 import logging
-import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 import ccxt
 import httpx
 from sqlalchemy.orm import Session
 from web3 import Web3
-from web3.types import Wei
 
 from app.config import settings
-from app.db.models import Wallet, Transaction, WalletType
-from app.modules.wallet import get_private_key, derive_wallet, CHAIN_CONFIGS
-from app.modules.rpc import get_web3, get_balance, estimate_gas
+from app.db.models import Transaction
+from app.modules.rpc import get_web3
+from app.modules.wallet import CHAIN_CONFIGS, derive_wallet
 from app.utils.budget import can_spend, record_spend
-from app.utils.notify import notify_alert, notify_error
+from app.utils.notify import notify_alert
 from app.utils.pnl import record_revenue
 
 logger = logging.getLogger("buckgen.defi")
@@ -118,7 +115,7 @@ async def get_swap_quote(
     to_token: str,
     amount_wei: str,  # amount in wei as string
     slippage: float = SLIPPAGE,
-) -> Optional[SwapQuote]:
+) -> SwapQuote | None:
     """
     Get a swap quote from the 1inch API.
 
@@ -150,11 +147,14 @@ async def get_swap_quote(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
             resp = await client.get(
                 f"{base_url}/quote",
                 params=params,
-                headers={"Accept": "application/json"},
             )
             if resp.status_code != 200:
                 logger.warning(
@@ -187,7 +187,7 @@ async def build_swap_transaction(
     amount_wei: str,
     wallet_address: str,
     slippage: float = SLIPPAGE,
-) -> Optional[dict]:
+) -> dict | None:
     """
     Build a swap transaction using the 1inch API.
 
@@ -198,8 +198,6 @@ async def build_swap_transaction(
     if not base_url:
         return None
 
-    native = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-
     params = {
         "src": from_token,
         "dst": to_token,
@@ -209,11 +207,14 @@ async def build_swap_transaction(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
             resp = await client.get(
                 f"{base_url}/swap",
                 params=params,
-                headers={"Accept": "application/json"},
             )
             if resp.status_code != 200:
                 logger.warning(
@@ -432,7 +433,7 @@ async def execute_swap(
 _trade_exchanges: dict[str, ccxt.Exchange] = {}
 
 
-def _get_trade_exchange(name: str) -> Optional[ccxt.Exchange]:
+def _get_trade_exchange(name: str) -> ccxt.Exchange | None:
     """Get (or create) a cached ccxt exchange instance with trade API keys."""
     if name in _trade_exchanges:
         return _trade_exchanges[name]

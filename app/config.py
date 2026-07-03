@@ -5,8 +5,8 @@ Seed phrase is optionally encrypted with AES-256-GCM and decrypted at runtime.
 """
 
 import os
-import sys
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 from app.utils.crypto import decrypt_env, encrypt_env
@@ -47,6 +47,9 @@ class Settings:
         # -- GitHub token (for bounty search, 5000 req/hr vs 60 unauthed) ---
         self.GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
 
+        # -- API authentication key -------------------------------------------
+        self.API_KEY: str = os.getenv("API_KEY", "")
+
         # -- Exchange API keys (read-only permissions) ----------------------
         self.BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
         self.BINANCE_SECRET: str = os.getenv("BINANCE_SECRET", "")
@@ -60,6 +63,10 @@ class Settings:
         self.KRAKEN_TRADE_SECRET: str = os.getenv("KRAKEN_TRADE_SECRET", "")
         self.BYBIT_TRADE_KEY: str = os.getenv("BYBIT_TRADE_KEY", "")
         self.BYBIT_TRADE_SECRET: str = os.getenv("BYBIT_TRADE_SECRET", "")
+
+        # -- Proxy (optional — SOCKS5 or HTTP proxy for all outbound traffic)
+        self.HTTP_PROXY: str = os.getenv("HTTP_PROXY", "")
+        self.HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", "")
 
         # -- RPC endpoints (publicnode.com is free, no API key needed) -------
         self.ETH_RPC_URL: str = os.getenv(
@@ -81,8 +88,8 @@ class Settings:
         self.TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
         # -- Budget ---------------------------------------------------------
-        self.DAILY_GAS_CAP_EUR: float = float(os.getenv("DAILY_GAS_CAP_EUR", "50.0"))
-        self.STOP_LOSS_EUR: float = float(os.getenv("STOP_LOSS_EUR", "500.0"))
+        self.DAILY_GAS_CAP_EUR: float = float(os.getenv("DAILY_GAS_CAP_EUR", "5.0"))
+        self.STOP_LOSS_EUR: float = float(os.getenv("STOP_LOSS_EUR", "20.0"))
 
         # -- Schedules (cron expressions) -----------------------------------
         self.CRON_BOUNTY_SCAN: str = os.getenv("CRON_BOUNTY_SCAN", "0 */2 * * *")
@@ -103,6 +110,32 @@ class Settings:
 
         # -- Debug ----------------------------------------------------------
         self.DEBUG: bool = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+
+    # ------------------------------------------------------------------
+    # HTTP helpers
+    # ------------------------------------------------------------------
+    def http_headers(self) -> dict[str, str]:
+        """Return headers with a realistic User-Agent for outbound requests."""
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+        }
+
+    def proxy_config(self) -> dict[str, str] | None:
+        """Return proxy configuration for httpx (None if not configured).
+
+        httpx 0.28+ proxy parameter accepts a dict mapping URL patterns
+        (with ``://`` suffix) to proxy URLs, or a single proxy URL string.
+        """
+        cfg: dict[str, str] = {}
+        if self.HTTP_PROXY:
+            cfg["http://"] = self.HTTP_PROXY
+        if self.HTTPS_PROXY:
+            cfg["https://"] = self.HTTPS_PROXY
+        return cfg or None
 
     # ------------------------------------------------------------------
     # Helpers

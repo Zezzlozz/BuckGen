@@ -13,12 +13,8 @@ Capabilities:
 
 import logging
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
-
-from app.config import settings
+from datetime import UTC, datetime
 
 logger = logging.getLogger("buckgen.system")
 
@@ -181,7 +177,7 @@ class SystemMonitor:
             total += sum(1 for t in state.error_timestamps if t > cutoff)
         return total
 
-    def get_state(self, name: str) -> Optional[dict]:
+    def get_state(self, name: str) -> dict | None:
         """Get detailed state for a module."""
         state = self._modules.get(name)
         if not state:
@@ -216,7 +212,7 @@ class SystemMonitor:
             "modules_down": down,
             "errors_last_hour": self.errors_in_window(60),
             "started_at": datetime.fromtimestamp(
-                self._started_at, tz=timezone.utc
+                self._started_at, tz=UTC
             ).isoformat(),
         }
 
@@ -271,7 +267,6 @@ class SystemMonitor:
                 # Re-derive wallet keyring
                 from app.modules.wallet import (
                     derive_wallet,
-                    get_all_wallets,
                     zero_keyring,
                 )
 

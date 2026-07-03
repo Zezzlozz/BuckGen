@@ -21,11 +21,8 @@ Capital: user has EUR 500+ available for arbitrage trades.
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from decimal import Decimal
-from datetime import datetime, timezone, timedelta
-from typing import Optional
-import re
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import ccxt
 import httpx
@@ -49,113 +46,99 @@ logger = logging.getLogger("buckgen.prices")
 MIN_PROFIT_THRESHOLD_PCT = 0.2
 
 # Extensive trading pair coverage (top 100+ pairs by volume)
-DEFAULT_TRADING_PAIRS = [
-    # Top 15
-    "BTC/USDT",
-    "ETH/USDT",
-    "SOL/USDT",
-    "XRP/USDT",
-    "DOGE/USDT",
-    "ADA/USDT",
-    "TRX/USDT",
-    "AVAX/USDT",
-    "LINK/USDT",
-    "DOT/USDT",
-    "LTC/USDT",
-    "BCH/USDT",
-    "MATIC/USDT",
-    "TON/USDT",
-    "UNI/USDT",
-    # Mid cap
-    "ATOM/USDT",
-    "ETC/USDT",
-    "XLM/USDT",
-    "FIL/USDT",
-    "APT/USDT",
-    "NEAR/USDT",
-    "INJ/USDT",
-    "OP/USDT",
-    "ARB/USDT",
-    "AAVE/USDT",
-    "PEPE/USDT",
-    "FLOKI/USDT",
-    "BONK/USDT",
-    "WIF/USDT",
-    "RUNE/USDT",
-    "FTM/USDT",
-    "ALGO/USDT",
-    "MANA/USDT",
-    "SAND/USDT",
-    "AXS/USDT",
-    "EGLD/USDT",
-    "FLOW/USDT",
-    "ICP/USDT",
-    "FET/USDT",
-    "GRT/USDT",
-    "CRV/USDT",
-    "BAL/USDT",
-    "MKR/USDT",
-    "COMP/USDT",
-    "SUSHI/USDT",
-    # Altcoins
-    "BNB/USDT",
-    "XMR/USDT",
-    "EOS/USDT",
-    "AAVE/USDT",
-    "KSM/USDT",
-    "ZEC/USDT",
-    "DASH/USDT",
-    "XTZ/USDT",
-    "VET/USDT",
-    "THETA/USDT",
-    "HBAR/USDT",
-    "ICP/USDT",
-    "FIL/USDT",
-    "NEAR/USDT",
-    "APT/USDT",
-    # DePIN & Gaming
-    "HNT/USDT",
-    "RNDR/USDT",
-    "IMX/USDT",
-    "GALA/USDT",
-    "ENJ/USDT",
-    "CHZ/USDT",
-    "APE/USDT",
-    "SAND/USDT",
-    "MANA/USDT",
-    "AXS/USDT",
-    # Layer 1
-    "SEI/USDT",
-    "SUI/USDT",
-    "TIA/USDT",
-    "DYM/USDT",
-    "STRK/USDT",
-    "MINA/USDT",
-    "ALGO/USDT",
-    "NEAR/USDT",
-    "INJ/USDT",
-    "RUNE/USDT",
-    # Stable pairs
-    "USDC/USDT",
-    "DAI/USDT",
-    "FDUSD/USDT",
-    "TUSD/USDT",
-    # Cross-chain bridged
-    "WBTC/USDT",
-    "WETH/USDT",
-    "stETH/USDT",
-    # Meme & low-cap (volatile = more arb)
-    "PEPE/USDT",
-    "FLOKI/USDT",
-    "BONK/USDT",
-    "WIF/USDT",
-    "MYRO/USDT",
-    "DOG/USDT",
-    "BRETT/USDT",
-    "MOG/USDT",
-    "COQ/USDT",
-    "POPCAT/USDT",
-]
+DEFAULT_TRADING_PAIRS = sorted(
+    {
+        # Top 15
+        "BTC/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "DOGE/USDT",
+        "ADA/USDT",
+        "TRX/USDT",
+        "AVAX/USDT",
+        "LINK/USDT",
+        "DOT/USDT",
+        "LTC/USDT",
+        "BCH/USDT",
+        "MATIC/USDT",
+        "TON/USDT",
+        "UNI/USDT",
+        # Mid cap
+        "ATOM/USDT",
+        "ETC/USDT",
+        "XLM/USDT",
+        "FIL/USDT",
+        "APT/USDT",
+        "NEAR/USDT",
+        "INJ/USDT",
+        "OP/USDT",
+        "ARB/USDT",
+        "AAVE/USDT",
+        "PEPE/USDT",
+        "FLOKI/USDT",
+        "BONK/USDT",
+        "WIF/USDT",
+        "RUNE/USDT",
+        "FTM/USDT",
+        "ALGO/USDT",
+        "MANA/USDT",
+        "SAND/USDT",
+        "AXS/USDT",
+        "EGLD/USDT",
+        "FLOW/USDT",
+        "ICP/USDT",
+        "FET/USDT",
+        "GRT/USDT",
+        "CRV/USDT",
+        "BAL/USDT",
+        "MKR/USDT",
+        "COMP/USDT",
+        "SUSHI/USDT",
+        # Altcoins
+        "BNB/USDT",
+        "XMR/USDT",
+        "EOS/USDT",
+        "KSM/USDT",
+        "ZEC/USDT",
+        "DASH/USDT",
+        "XTZ/USDT",
+        "VET/USDT",
+        "THETA/USDT",
+        "HBAR/USDT",
+        # DePIN & Gaming
+        "HNT/USDT",
+        "RNDR/USDT",
+        "IMX/USDT",
+        "GALA/USDT",
+        "ENJ/USDT",
+        "CHZ/USDT",
+        "APE/USDT",
+        # Layer 1
+        "SEI/USDT",
+        "SUI/USDT",
+        "TIA/USDT",
+        "DYM/USDT",
+        "STRK/USDT",
+        "MINA/USDT",
+        # Stable pairs
+        "USDC/USDT",
+        "DAI/USDT",
+        "FDUSD/USDT",
+        "TUSD/USDT",
+        # Cross-chain bridged
+        "WBTC/USDT",
+        "WETH/USDT",
+        "stETH/USDT",
+        # Meme & low-cap (volatile = more arb)
+        "MYRO/USDT",
+        "DOG/USDT",
+        "BRETT/USDT",
+        "MOG/USDT",
+        "COQ/USDT",
+        "POPCAT/USDT",
+    }
+)
 
 # Extended pairs for wider coverage (same as default now since default is already 100+)
 EXTENDED_PAIRS = DEFAULT_TRADING_PAIRS
@@ -331,7 +314,7 @@ CG_SYMBOL_TO_ID: dict[str, str] = {
 }
 
 
-def _get_exchange(name: str) -> Optional[ccxt.Exchange]:
+def _get_exchange(name: str) -> ccxt.Exchange | None:
     """Get (or create) a cached ccxt exchange instance."""
     if name in _exchanges:
         return _exchanges[name]
@@ -345,7 +328,13 @@ def _get_exchange(name: str) -> Optional[ccxt.Exchange]:
         config = {
             "enableRateLimit": True,
             "timeout": 10000,
+            "headers": settings.http_headers(),
         }
+
+        # Add proxy for ccxt if configured
+        proxy_url = settings.HTTPS_PROXY or settings.HTTP_PROXY
+        if proxy_url:
+            config["proxies"] = {"http": proxy_url, "https": proxy_url}
 
         # Add API keys if configured (read-only for public endpoints)
         if name == "binance":
@@ -511,7 +500,11 @@ async def _load_coingecko_ids() -> dict[str, str]:
         return _COINGECKO_IDS
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
             resp = await client.get(f"{COINGECKO_API}/coins/list")
             if resp.status_code == 200:
                 coins = resp.json()
@@ -550,7 +543,11 @@ async def fetch_coingecko_price(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
             resp = await client.get(url, params=params)
             if resp.status_code != 200:
                 return CoinGeckoPrice(
@@ -768,7 +765,7 @@ def store_ticker_snapshots(
         Number of snapshots stored.
     """
     count = 0
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for pair, exchange_prices in tickers.items():
         for tp in exchange_prices:
@@ -819,7 +816,7 @@ def get_price_history(
     Returns:
         List of {timestamp, exchange, last, volume} dicts.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
     query = (
         db.query(PriceSnapshot)
         .filter(

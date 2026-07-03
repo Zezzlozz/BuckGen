@@ -2,8 +2,7 @@
 Budget manager — enforces daily and cumulative spending limits.
 """
 
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import UTC, datetime
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -22,7 +21,7 @@ def record_spend(
     memo: str = "",
 ) -> BudgetEntry:
     """Record a spending event."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     entry = BudgetEntry(
         date=today,
         category=category,
@@ -37,7 +36,7 @@ def record_spend(
 
 def daily_spend(db: Session) -> float:
     """Return total EUR spent today."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     result = (
         db.query(func.sum(BudgetEntry.amount_eur))
         .filter(BudgetEntry.date == today)

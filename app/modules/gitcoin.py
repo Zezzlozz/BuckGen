@@ -7,10 +7,11 @@ with the 'bounty' label on github.com/gitcoinco/web.
 
 import logging
 import re
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+
+from app.config import settings
 
 logger = logging.getLogger("buckgen.bounties")
 
@@ -47,13 +48,18 @@ async def fetch_open_bounties(
     """
     own_client = client is None
     if own_client:
-        client = httpx.AsyncClient(timeout=30.0)
+        client = httpx.AsyncClient(
+            timeout=30.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        )
+    else:
+        # Merge UA into existing client headers
+        client = client
 
     headers = {"Accept": "application/vnd.github.v3+json"}
 
     # Pull token from config if available
-    from app.config import settings
-
     if settings.GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {settings.GITHUB_TOKEN}"
 
@@ -129,7 +135,7 @@ def normalize_bounty(raw: dict[str, Any]) -> dict[str, Any]:
     """
     Extract bounty fields from a GitHub API issue item.
     """
-    labels = [l.get("name", "") for l in raw.get("labels", [])]
+    labels = [label.get("name", "") for label in raw.get("labels", [])]
     repo_full = raw.get("repository_url", "").replace(
         "https://api.github.com/repos/", ""
     )
@@ -141,7 +147,7 @@ def normalize_bounty(raw: dict[str, Any]) -> dict[str, Any]:
         "reward_amount": _parse_reward_from_issue(raw),
         "reward_currency": _parse_currency_from_issue(raw),
         "experience_level": _detect_level(
-            labels + [raw.get("title", ""), raw.get("body", "")]
+            labels + [raw.get("title", ""), raw.get("body") or ""]
         ),
         "labels": labels,
         "repo": repo_full,
@@ -160,7 +166,7 @@ def _parse_reward_from_issue(issue: dict[str, Any]) -> float:
     text = f"{issue.get('title', '')} {issue.get('body', '')}"
 
     # First: look for price labels like "price: 500" or "reward: 1000 USDC"
-    labels = [l.get("name", "") for l in issue.get("labels", [])]
+    labels = [label.get("name", "") for label in issue.get("labels", [])]
     for label in labels:
         m = re.search(r"price[:\s]*\$?(\d+[\d,.]*)", label, re.I)
         if m:

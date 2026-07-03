@@ -4,10 +4,11 @@ Seed phrase and API keys are encrypted in .env.encrypted,
 decrypted once at startup into memory, and zeroed on shutdown.
 """
 
-import os
 import base64
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import os
+
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 

@@ -9,27 +9,23 @@ Strategies:
   3. Batch registration — derive N wallets per chain, register on platforms.
 """
 
+import asyncio
 import logging
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
-from urllib.parse import urlencode
 
 import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import Wallet, WalletType, Transaction, Bounty, BountyPlatform
+from app.db.models import Transaction, Wallet, WalletType
 from app.modules.wallet import (
-    derive_wallet,
-    sync_wallet_to_db,
-    get_private_key,
     CHAIN_CONFIGS,
+    sync_wallet_to_db,
 )
-from app.utils.notify import notify_alert, notify_error
 from app.utils.budget import can_spend, record_spend
+from app.utils.notify import notify_alert
 
 logger = logging.getLogger("buckgen.airdrop")
 
@@ -464,7 +460,9 @@ async def discover_airdrops(max_results: int = 10) -> list[AirdropOpportunity]:
     if settings.GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {settings.GITHUB_TOKEN}"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(
+        timeout=15.0, headers=settings.http_headers(), proxy=settings.proxy_config()
+    ) as client:
         for query in queries:
             try:
                 params = {
@@ -558,7 +556,7 @@ def _score_airdrop(title: str, body: str, labels: list[str]) -> float:
         score += 0.2
     if any(w in text for w in ["testnet", "launch", "mainnet", "tge"]):
         score += 0.15
-    if any(l in labels for l in ["airdrop", "reward", "incentivized"]):
+    if any(label in labels for label in ["airdrop", "reward", "incentivized"]):
         score += 0.15
     if "$" in text or any(c in text for c in ["usd", "eth", "btc"]):
         score += 0.1
@@ -621,12 +619,15 @@ async def claim_faucet(
 
     try:
         payload = {faucet.wallet_field: wallet_address, **faucet.claim_params}
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
             if faucet.claim_method == "POST":
                 resp = await client.post(
                     faucet.claim_url,
                     json=payload,
-                    headers={"User-Agent": "Mozilla/5.0"},
                 )
             else:
                 resp = await client.get(
@@ -825,7 +826,11 @@ async def _register_on_github(
         try:
             # Star the repo (common airdrop task requirement)
             if repo:
-                async with httpx.AsyncClient(timeout=15.0) as client:
+                async with httpx.AsyncClient(
+                    timeout=15.0,
+                    headers=settings.http_headers(),
+                    proxy=settings.proxy_config(),
+                ) as client:
                     star_resp = await client.put(
                         f"https://api.github.com/user/starred/{repo}",
                         headers=headers,
@@ -880,12 +885,16 @@ async def _register_on_dework(
         try:
             # Dework API: Submit a task application
             if task_id:
-                async with httpx.AsyncClient(timeout=15.0) as client:
+                async with httpx.AsyncClient(
+                    timeout=15.0,
+                    headers=settings.http_headers(),
+                    proxy=settings.proxy_config(),
+                ) as client:
                     resp = await client.post(
                         f"{dework_api}/tasks/{task_id}/applications",
                         json={
                             "walletAddress": w.address,
-                            "message": f"Applying from BuckGen agent wallet {w.address[:10]}...",
+                            "message": f"Applying for task from wallet {w.address[:10]}...",
                         },
                         headers={"Content-Type": "application/json"},
                     )
@@ -931,12 +940,16 @@ async def _register_on_galxe(
     for w in wallets:
         try:
             # Galxe API: Submit wallet for credential
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                headers=settings.http_headers(),
+                proxy=settings.proxy_config(),
+            ) as client:
                 resp = await client.post(
                     f"{galxe_api}/credentials/claim",
                     json={
                         "walletAddress": w.address,
-                        "source": "buckgen_agent",
+                        "source": "automation_wallet",
                     },
                     headers={"Content-Type": "application/json"},
                 )
@@ -1088,7 +1101,7 @@ async def farm_opportunities(db: Session) -> dict:
                 existing_wallets = (
                     db.query(Wallet)
                     .filter(
-                        Wallet.is_active == True,
+                        Wallet.is_active,
                         Wallet.wallet_type == WalletType.DISPOSABLE,
                     )
                     .limit(3)
@@ -1103,7 +1116,3 @@ async def farm_opportunities(db: Session) -> dict:
         summary["errors"].append(f"registration: {exc}")
 
     return summary
-
-
-# Needed for async sleep in claim_all_faucets
-import asyncio

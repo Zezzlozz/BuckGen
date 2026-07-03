@@ -3,23 +3,22 @@ SQLAlchemy database models for state persistence.
 """
 
 import enum
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
-    Integer,
+    DateTime,
+    Enum,
     Float,
+    Index,
+    Integer,
     String,
     Text,
-    Enum,
-    DateTime,
-    Boolean,
-    create_engine,
     UniqueConstraint,
-    Index,
+    create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
-
 
 # ---------------------------------------------------------------------------
 # Engine & session
@@ -30,7 +29,6 @@ _SessionLocal = None
 
 def init_db(db_url: str) -> None:
     global _engine, _SessionLocal
-    import sqlalchemy
 
     # Ensure data directory exists for SQLite file
     if db_url.startswith("sqlite"):
@@ -69,14 +67,14 @@ class Base(DeclarativeBase):
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
-class BountyPlatform(str, enum.Enum):
+class BountyPlatform(enum.StrEnum):
     GITHUB = "github"  # GitHub Issues with bounty labels (primary)
     DEWORK = "dework"
     LAYER3 = "layer3"
     HACKQUEST = "hackquest"
 
 
-class BountyStatus(str, enum.Enum):
+class BountyStatus(enum.StrEnum):
     OPEN = "open"
     APPLIED = "applied"
     SUBMITTED = "submitted"
@@ -85,7 +83,7 @@ class BountyStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class WalletType(str, enum.Enum):
+class WalletType(enum.StrEnum):
     HOT = "hot"
     COLD = "cold"
     DISPOSABLE = "disposable"  # one-time claim wallet
@@ -108,11 +106,11 @@ class Bounty(Base):
     url = Column(String(1024), default="")
     status = Column(Enum(BountyStatus), default=BountyStatus.OPEN)
     score = Column(Float, default=0.0)  # LLM-assigned score
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
     updated_at = Column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
     __table_args__ = (
@@ -138,7 +136,7 @@ class Wallet(Base):
         String(64), default="0"
     )  # stored as string to avoid precision loss
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
     last_used_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
@@ -162,7 +160,7 @@ class Transaction(Base):
     gas_used_wei = Column(String(64), default="0")
     status = Column(String(32), default="pending")  # pending, confirmed, failed
     memo = Column(String(512), default="")
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
     confirmed_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
@@ -184,7 +182,7 @@ class BlacklistEntry(Base):
     source_id = Column(String(255), nullable=False)
     reason = Column(String(512), default="")
     failed_attempts = Column(Integer, default=0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     __table_args__ = (
         UniqueConstraint("source_type", "source_id", name="uq_blacklist_source"),
@@ -202,7 +200,7 @@ class BudgetEntry(Base):
     category = Column(String(64), default="gas")  # gas, api, proxy
     amount_eur = Column(Float, default=0.0)
     memo = Column(String(256), default="")
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     __table_args__ = (Index("ix_budget_date", "date"),)
 
@@ -223,7 +221,7 @@ class RevenueEntry(Base):
     currency = Column(String(16), default="EUR")
     source = Column(String(255), default="")  # e.g. bounty URL, arb pair, airdrop name
     memo = Column(String(512), default="")
-    earned_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    earned_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     __table_args__ = (Index("ix_revenue_earned_at", "earned_at"),)
 
@@ -243,6 +241,6 @@ class PriceSnapshot(Base):
     ask = Column(Float, default=0.0)
     last = Column(Float, default=0.0)
     volume = Column(Float, default=0.0)
-    recorded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    recorded_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     __table_args__ = (Index("ix_snapshot_pair_time", "pair", "recorded_at"),)

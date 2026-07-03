@@ -14,25 +14,15 @@ Gas costs are tracked against the budget.
 """
 
 import logging
-import random
-from datetime import datetime, timezone
-from typing import Optional
-from decimal import Decimal
 
-import httpx
 from sqlalchemy.orm import Session
 from web3 import Web3
-from web3.types import Wei
 
-from app.config import settings
-from app.db.models import Wallet, WalletType, Transaction
+from app.db.models import Transaction
+from app.modules.rpc import get_web3
 from app.modules.wallet import (
     derive_wallet,
-    get_private_key,
-    sync_wallet_to_db,
-    CHAIN_CONFIGS,
 )
-from app.modules.rpc import get_web3, get_balance
 from app.utils.budget import can_spend, record_spend
 from app.utils.notify import notify_alert
 
@@ -142,7 +132,7 @@ TESTNET_USDC: dict[str, str] = {
 # =============================================================================
 
 
-def _get_testnet_w3(chain: str) -> Optional[Web3]:
+def _get_testnet_w3(chain: str) -> Web3 | None:
     """Get Web3 connection for a testnet chain."""
     config = TESTNET_CONFIG.get(chain)
     if not config:
@@ -262,7 +252,6 @@ async def deploy_test_contract(
         return {"success": False, "error": f"Cannot connect to {chain}"}
 
     config = TESTNET_CONFIG.get(chain, {})
-    symbol = config.get("symbol", "ETH")
 
     if not can_spend(db, 0.002):
         return {"success": False, "error": "Budget cap reached"}

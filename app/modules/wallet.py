@@ -14,13 +14,13 @@ Security:
 """
 
 import logging
-from typing import Optional
+
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import Wallet, WalletType, Base
+from app.db.models import Wallet, WalletType
 from app.utils.crypto import zero_bytes
 
 logger = logging.getLogger("buckgen.wallet")
@@ -120,7 +120,7 @@ def derive_wallet(
     return account
 
 
-def get_wallet(path: str) -> Optional[LocalAccount]:
+def get_wallet(path: str) -> LocalAccount | None:
     """Retrieve a previously derived wallet by its derivation path."""
     return _keyring.get(path)
 
@@ -196,7 +196,7 @@ def derive_and_sync_batch(
 # ---------------------------------------------------------------------------
 # Private key access (cautious)
 # ---------------------------------------------------------------------------
-def get_private_key(address: str) -> Optional[bytes]:
+def get_private_key(address: str) -> bytes | None:
     """
     Get the private key bytes for a derived address.
     Returns None if the wallet hasn't been derived in this session.
@@ -210,7 +210,7 @@ def get_private_key(address: str) -> Optional[bytes]:
     return None
 
 
-def get_private_key_for_path(path: str) -> Optional[bytes]:
+def get_private_key_for_path(path: str) -> bytes | None:
     """Get private key by derivation path."""
     account = _keyring.get(path)
     return account.key if account else None
