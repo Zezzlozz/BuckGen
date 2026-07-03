@@ -1,0 +1,31 @@
+﻿{
+  "type": "web_service",
+  "name": "buckgen",
+  "ownerId": "tea-d93skvtckfvc73957vn0",
+  "repo": "https://github.com/Zezzlozz/BuckGen",
+  "branch": "master",
+  "autoDeploy": "yes",
+  "envVars": [
+    {"key": "DATABASE_URL", "value": "sqlite:///data/buckgen.db"},
+    {"key": "DEBUG", "value": "false"},
+    {"key": "DAILY_GAS_CAP_EUR", "value": "5.0"},
+    {"key": "STOP_LOSS_EUR", "value": "20.0"},
+    {"key": "CRON_BOUNTY_SCAN", "value": "0 */2 * * *"},
+    {"key": "CRON_PRICE_CHECK", "value": "*/30 * * * *"},
+    {"key": "CRON_AIRDROP", "value": "0 */3 * * *"},
+    {"key": "OLLAMA_MODEL", "value": "qwen2.5:7b"}
+  ],
+  "serviceDetails": {
+    "runtime": "docker",
+    "envSpecificDetails": {
+      "dockerfilePath": "./Dockerfile"
+    },
+    "healthCheckPath": "/health",
+    "plan": "free",
+    "disk": {
+      "name": "buckgen-data",
+      "mountPath": "/app/data",
+      "sizeGB": 1
+    }
+  }
+}

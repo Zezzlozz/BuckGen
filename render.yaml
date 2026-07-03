@@ -16,10 +16,12 @@ services:
         value: sqlite:///data/buckgen.db
       - key: DEBUG
         value: "false"
+      - key: API_KEY
+        sync: false
       - key: DAILY_GAS_CAP_EUR
-        value: "50.0"
+        value: "5.0"
       - key: STOP_LOSS_EUR
-        value: "500.0"
+        value: "20.0"
       - key: CRON_BOUNTY_SCAN
         value: "0 */2 * * *"
       - key: CRON_PRICE_CHECK
