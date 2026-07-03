@@ -76,6 +76,9 @@ class BountyPlatform(enum.StrEnum):
 
 class BountyStatus(enum.StrEnum):
     OPEN = "open"
+    RESEARCHED = "researched"  # ROI briefing generated, awaiting your review
+    DRAFTED = "drafted"  # draft solution prepared for your review (not posted)
+    APPROVED = "approved"  # you explicitly approved posting this one
     APPLIED = "applied"
     SUBMITTED = "submitted"
     PAID = "paid"
@@ -106,6 +109,13 @@ class Bounty(Base):
     url = Column(String(1024), default="")
     status = Column(Enum(BountyStatus), default=BountyStatus.OPEN)
     score = Column(Float, default=0.0)  # LLM-assigned score
+    # --- Review-flow fields (human-in-the-loop) ---
+    roi_score = Column(Float, default=0.0)  # expected $ per hour of effort
+    effort_hours = Column(Float, default=0.0)  # LLM estimate of effort
+    payout_confidence = Column(Float, default=0.0)  # 0-1 likelihood of real payout
+    briefing = Column(Text, default="")  # private research writeup for you
+    draft_solution = Column(Text, default="")  # draft for your review (not posted)
+    approved_at = Column(DateTime, nullable=True)  # set only when YOU approve
     created_at = Column(DateTime, default=lambda: datetime.now(UTC))
     updated_at = Column(
         DateTime,

@@ -588,15 +588,19 @@ async def bounties_top(
 async def bounties_submit(
     _: None = Depends(_require_api_key), bounty_id: int = Path(ge=1)
 ) -> dict:
-    """Generate a solution and post a comment on a specific bounty issue."""
-    from app.modules.submit_bounty import submit_bounty
-
-    db = next(get_session())
-    try:
-        result = await submit_bounty(db, bounty_id)
-        return result
-    finally:
-        db.close()
+    """Deprecated: auto-posting is disabled. Use the human-in-the-loop flow:
+    POST /bounties/{id}/research -> /draft -> /approve -> /post?confirm=true.
+    """
+    return {
+        "success": False,
+        "error": "auto-submit disabled",
+        "use_instead": [
+            f"POST /bounties/{bounty_id}/research",
+            f"POST /bounties/{bounty_id}/draft",
+            f"POST /bounties/{bounty_id}/approve",
+            f"POST /bounties/{bounty_id}/post?confirm=true",
+        ],
+    }
 
 
 @app.post("/bounties/submit-top")
@@ -605,13 +609,109 @@ async def bounties_submit_top(
     max_subs: int = Query(default=3, ge=1, le=20),
     min_score: float = Query(default=0.7, ge=0.0, le=1.0),
 ) -> dict:
-    """Auto-submit solutions for the highest-scoring open bounties."""
-    from app.modules.submit_bounty import submit_top_bounties
+    """Deprecated: bulk auto-posting is disabled. This now researches the
+    top bounties into your review queue instead of posting anything.
+    """
+    from app.modules.bounty_review import research_unassessed
 
     db = next(get_session())
     try:
-        results = await submit_top_bounties(db, max_subs, min_score)
-        return {"submissions": len(results), "results": results}
+        results = await research_unassessed(db, limit=max_subs)
+        return {
+            "success": True,
+            "note": "Auto-post disabled. Researched into your review queue.",
+            "researched": len(results),
+            "results": results,
+            "next": "GET /bounties/review-queue",
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Bounty review (human-in-the-loop, ROI-ranked)
+# ---------------------------------------------------------------------------
+@app.get("/bounties/review-queue")
+async def bounties_review_queue(
+    limit: int = Query(default=20, ge=1, le=100),
+    min_roi: float = Query(default=0.0, ge=0.0),
+) -> dict:
+    """Your bounties, ranked by expected $ / hour."""
+    from app.modules.bounty_review import rank_by_roi
+
+    db = next(get_session())
+    try:
+        return {"queue": rank_by_roi(db, limit=limit, min_roi=min_roi)}
+    finally:
+        db.close()
+
+
+@app.get("/bounties/digest")
+async def bounties_digest(limit: int = Query(default=15, ge=1, le=50)) -> dict:
+    """Markdown digest of the ROI-ranked queue (easy to export/paste)."""
+    from app.modules.bounty_review import build_digest
+
+    db = next(get_session())
+    try:
+        return {"markdown": build_digest(db, limit=limit)}
+    finally:
+        db.close()
+
+
+@app.post("/bounties/{bounty_id}/research")
+async def bounties_research(
+    _: None = Depends(_require_api_key), bounty_id: int = Path(ge=1)
+) -> dict:
+    """Generate a private ROI briefing. Posts nothing."""
+    from app.modules.bounty_review import research_bounty
+
+    db = next(get_session())
+    try:
+        return await research_bounty(db, bounty_id)
+    finally:
+        db.close()
+
+
+@app.post("/bounties/{bounty_id}/draft")
+async def bounties_draft(
+    _: None = Depends(_require_api_key), bounty_id: int = Path(ge=1)
+) -> dict:
+    """Generate a draft solution for YOUR review. Posts nothing."""
+    from app.modules.bounty_review import prepare_draft
+
+    db = next(get_session())
+    try:
+        return await prepare_draft(db, bounty_id)
+    finally:
+        db.close()
+
+
+@app.post("/bounties/{bounty_id}/approve")
+async def bounties_approve(
+    _: None = Depends(_require_api_key), bounty_id: int = Path(ge=1)
+) -> dict:
+    """Approve a reviewed draft for posting. Deliberate, per-item. Posts nothing."""
+    from app.modules.bounty_review import approve
+
+    db = next(get_session())
+    try:
+        return approve(db, bounty_id)
+    finally:
+        db.close()
+
+
+@app.post("/bounties/{bounty_id}/post")
+async def bounties_post(
+    _: None = Depends(_require_api_key),
+    bounty_id: int = Path(ge=1),
+    confirm: bool = Query(default=False),
+) -> dict:
+    """Post an APPROVED draft. Requires approval AND confirm=true."""
+    from app.modules.bounty_review import post_approved
+
+    db = next(get_session())
+    try:
+        return await post_approved(db, bounty_id, confirm=confirm)
     finally:
         db.close()
 
