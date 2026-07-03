@@ -13,12 +13,44 @@ Task types and their preferred models:
 """
 
 import asyncio
+import hashlib
 import logging
 import random
+import time
 
 from app.config import settings
 
 logger = logging.getLogger("buckgen.llm")
+
+# In-memory TTL cache for LLM responses to avoid redundant API calls.
+# Keyed by hash(task_type + prompt), valued by (timestamp, response).
+# Cached items expire after LLM_CACHE_TTL seconds.
+LLM_CACHE_TTL = 1800  # 30 minutes
+_llm_cache: dict[str, tuple[float, str]] = {}
+
+
+def _cache_key(task_type: str, prompt: str) -> str:
+    """Generate a deterministic cache key for an LLM call."""
+    raw = f"{task_type}||{prompt}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cache_get(key: str) -> str | None:
+    """Get cached response if not expired."""
+    entry = _llm_cache.get(key)
+    if entry is None:
+        return None
+    timestamp, text = entry
+    if time.time() - timestamp > LLM_CACHE_TTL:
+        del _llm_cache[key]
+        return None
+    return text
+
+
+def _cache_set(key: str, text: str) -> None:
+    """Store a response in the cache."""
+    _llm_cache[key] = (time.time(), text)
+
 
 # Maps task_type → settings attr name for the primary Zen model
 _ZEN_MODEL_ATTR: dict[str, str] = {
@@ -62,14 +94,23 @@ async def call_llm(
         logger.warning("Unknown task_type %r — defaulting to 'code'", task_type)
         task_type = "code"
 
+    # -- 0) Check cache -----------------------------------------------------
+    key = _cache_key(task_type, prompt)
+    cached = _cache_get(key)
+    if cached is not None:
+        logger.debug("LLM cache hit for %s (%d chars)", task_type, len(prompt))
+        return cached
+
     # -- 1) OpenCode Zen ----------------------------------------------------
     text = await _call_zen(task_type, prompt, system_prompt, max_tokens, temperature)
     if text is not None:
+        _cache_set(key, text)
         return text
 
     # -- 2) Local Ollama ----------------------------------------------------
     text = await _call_ollama(prompt, max_tokens, temperature)
     if text is not None:
+        _cache_set(key, text)
         return text
 
     return None

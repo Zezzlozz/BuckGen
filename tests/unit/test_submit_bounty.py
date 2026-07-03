@@ -203,10 +203,16 @@ class TestSubmitBounty:
     def test_comment_failure(self, db_session):
         bounty = _make_db_bounty(db_session)
 
-        # LLM response: success
+        # LLM response: passes validation gates (≥100 chars + ```)
         llm_resp = MagicMock()
         llm_resp.status_code = 200
-        llm_resp.json.return_value = {"response": "solution text"}
+        llm_resp.json.return_value = {
+            "response": (
+                "Here is a detailed fix with implementation:\n\n"
+                "```python\ndef solve():\n    return 42\n```\n\n"
+                "This approach handles all edge cases properly."
+            )
+        }
 
         # GitHub response: failure
         gh_resp = MagicMock()
@@ -233,7 +239,7 @@ class TestSubmitBounty:
         ):
             result = _run(submit_bounty(db_session, bounty.id))
             assert result["success"] is False
-            assert "comment" in result["error"].lower()
+            assert "comment" in result.get("error", "").lower()
 
     @patch("app.config.settings.GITHUB_TOKEN", "ghp_test")
     @patch("app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434")
@@ -243,7 +249,13 @@ class TestSubmitBounty:
 
         llm_resp = MagicMock()
         llm_resp.status_code = 200
-        llm_resp.json.return_value = {"response": "Here is a fix for the bug"}
+        llm_resp.json.return_value = {
+            "response": (
+                "Here is a detailed fix with implementation:\n\n"
+                "```python\ndef solve():\n    return 42\n```\n\n"
+                "This approach handles all edge cases properly."
+            )
+        }
 
         gh_resp = MagicMock()
         gh_resp.status_code = 201

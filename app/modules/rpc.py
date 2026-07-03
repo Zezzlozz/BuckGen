@@ -2,7 +2,8 @@
 Multi-chain RPC client — balance checks, gas estimation, transaction building.
 
 Supported chains: ethereum, base, arbitrum, polygon, bsc
-All use publicnode.com free endpoints by default (configurable in .env).
+Primary URL per chain from settings, with automatic fallback to public
+endpoints (llamarpc, ankr, blastapi, etc.) when primary is unreachable.
 """
 
 import logging
@@ -57,28 +58,78 @@ _RPC_URLS: dict[str, str] = {
     "bsc": settings.BSC_RPC_URL,
 }
 
+# Fallback RPC endpoints tried when the primary is unreachable
+_RPC_FALLBACKS: dict[str, list[str]] = {
+    "ethereum": [
+        "https://eth.llamarpc.com",
+        "https://rpc.ankr.com/eth",
+        "https://eth-mainnet.public.blastapi.io",
+    ],
+    "base": [
+        "https://base.llamarpc.com",
+        "https://base-rpc.publicnode.com",
+        "https://mainnet.base.org",
+    ],
+    "arbitrum": [
+        "https://arbitrum.llamarpc.com",
+        "https://arbitrum-one-rpc.publicnode.com",
+        "https://arb1.arbitrum.io/rpc",
+    ],
+    "polygon": [
+        "https://polygon.llamarpc.com",
+        "https://polygon-rpc.com",
+        "https://rpc-mainnet.maticvigil.com",
+    ],
+    "bsc": [
+        "https://bsc.llamarpc.com",
+        "https://bsc-dataseed2.binance.org",
+        "https://bsc-dataseed3.binance.org",
+    ],
+}
+
 
 def get_web3(chain: str) -> Web3 | None:
-    """Get (or create) a cached Web3 connection for the given chain."""
-    if chain in _w3_cache:
-        return _w3_cache[chain]
+    """Get (or create) a cached Web3 connection for the given chain.
 
-    url = _RPC_URLS.get(chain)
-    if not url:
+    Tries primary URL first, then fallback URLs in order.
+    Caches the first working connection. Verifies cached connections
+    are still alive before returning them.
+    """
+    # Probe cached connection — is it still alive?
+    cached = _w3_cache.get(chain)
+    if cached is not None:
+        try:
+            if cached.is_connected():
+                return cached
+        except Exception:
+            pass
+        # Connection lost — remove from cache and reconnect
+        logger.info("RPC %s: cached connection lost, reconnecting...", chain)
+        del _w3_cache[chain]
+
+    # Build URL list: primary + fallbacks
+    primary = _RPC_URLS.get(chain)
+    if not primary:
         logger.warning("No RPC URL configured for chain '%s'", chain)
         return None
 
-    try:
-        w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 10}))
-        if w3.is_connected():
-            _w3_cache[chain] = w3
-            return w3
-        else:
-            logger.warning("RPC %s (%s): not connected", chain, url)
-            return None
-    except Exception as exc:
-        logger.warning("RPC %s (%s): connection error: %s", chain, url, exc)
-        return None
+    urls = [primary] + _RPC_FALLBACKS.get(chain, [])
+
+    for url in urls:
+        try:
+            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 10}))
+            if w3.is_connected():
+                _w3_cache[chain] = w3
+                if url != primary:
+                    logger.info("RPC %s: using fallback %s", chain, url)
+                return w3
+            else:
+                logger.debug("RPC %s (%s): not connected, trying next...", chain, url)
+        except Exception as exc:
+            logger.debug("RPC %s (%s): error: %s, trying next...", chain, url, exc)
+
+    logger.warning("RPC %s: all endpoints unreachable", chain)
+    return None
 
 
 def _symbol(chain: str) -> str:

@@ -230,6 +230,33 @@ async def submit_bounty(
         currency=bounty.reward_currency,
     )
 
+    # --- Solution validation gates ---
+    validation_gates = [
+        ("min_length", len(solution) >= 100),
+        ("max_length", len(solution) <= 5000),
+        ("has_code", "```" in solution),
+    ]
+    failed_gate = None
+    for gate_name, passed in validation_gates:
+        if not passed:
+            failed_gate = gate_name
+            break
+
+    if failed_gate:
+        bounty.status = BountyStatus.FAILED
+        bounty.updated_at = datetime.now(UTC)
+        db.commit()
+        logger.warning(
+            "Bounty #%d failed validation gate '%s' — solution length=%d",
+            bounty.id,
+            failed_gate,
+            len(solution),
+        )
+        return {
+            "success": False,
+            "error": f"Solution failed quality gate: {failed_gate}",
+        }
+
     # Post comment (with retry support)
     posted = await post_comment(repo, issue_number, solution)
 

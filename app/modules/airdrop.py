@@ -434,6 +434,12 @@ FAUCET_REGISTRY: list[FaucetInfo] = [
 # Keep track of recent claims in-memory to avoid hitting cooldowns twice
 _recent_claims: dict[str, float] = {}  # faucet_name -> timestamp
 
+# Faucet health tracking — circuit breaker to skip dead faucets
+FAUCET_CIRCUIT_BREAKER = 5  # disable after this many consecutive failures
+_faucet_health: dict[
+    str, dict
+] = {}  # faucet_name -> {"consecutive_failures": int, "disabled": bool}
+
 
 # =============================================================================
 # Airdrop discovery
@@ -583,6 +589,22 @@ def _extract_tokens(body: str) -> str:
 # =============================================================================
 
 
+def _track_faucet_failure(faucet_name: str) -> None:
+    """Track a faucet failure and disable if threshold exceeded."""
+    health = _faucet_health.get(
+        faucet_name, {"consecutive_failures": 0, "disabled": False}
+    )
+    health["consecutive_failures"] += 1
+    if health["consecutive_failures"] >= FAUCET_CIRCUIT_BREAKER:
+        health["disabled"] = True
+        logger.warning(
+            "Faucet '%s' disabled after %d consecutive failures",
+            faucet_name,
+            FAUCET_CIRCUIT_BREAKER,
+        )
+    _faucet_health[faucet_name] = health
+
+
 async def claim_faucet(
     faucet: FaucetInfo,
     wallet_address: str,
@@ -593,6 +615,15 @@ async def claim_faucet(
 
     Returns {'success': bool, 'amount': float, 'message': str}
     """
+    # Check circuit breaker — skip dead faucets
+    health = _faucet_health.get(faucet.name)
+    if health and health.get("disabled"):
+        return {
+            "success": False,
+            "amount": 0,
+            "message": f"Skipped (disabled after {FAUCET_CIRCUIT_BREAKER} consecutive failures)",
+        }
+
     # Check cooldown
     cooldown_key = f"{faucet.name}:{wallet_address[:10]}"
     last_claim = _recent_claims.get(cooldown_key, 0.0)
@@ -646,6 +677,8 @@ async def claim_faucet(
             success = True
 
         if success:
+            # Reset health — faucet works
+            _faucet_health[faucet.name] = {"consecutive_failures": 0, "disabled": False}
             _recent_claims[cooldown_key] = time.time()
             record_spend(db, 0.001, "gas", f"faucet_claim:{faucet.name}")
 
@@ -675,6 +708,8 @@ async def claim_faucet(
                 "message": f"Claimed {faucet.amount_per_claim} {faucet.symbol}",
             }
         else:
+            # Track consecutive failure
+            _track_faucet_failure(faucet.name)
             logger.info(
                 "Faucet claim FAILED: %s (HTTP %d): %s",
                 faucet.name,
@@ -688,9 +723,11 @@ async def claim_faucet(
             }
 
     except httpx.RequestError as exc:
+        _track_faucet_failure(faucet.name)
         logger.warning("Faucet %s network error: %s", faucet.name, exc)
         return {"success": False, "amount": 0, "message": f"Network error: {exc}"}
     except Exception as exc:
+        _track_faucet_failure(faucet.name)
         logger.warning("Faucet %s unexpected error: %s", faucet.name, exc)
         return {"success": False, "amount": 0, "message": str(exc)[:100]}
 

@@ -8,6 +8,7 @@ just known web3 repos — label search covers the entire ecosystem).
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -17,6 +18,45 @@ from app.config import settings
 logger = logging.getLogger("buckgen.bounties")
 
 GITHUB_API = "https://api.github.com"
+
+# GitHub rate limit tracking — shared across all queries
+_rate_limit_remaining: int = 5000  # optimistic default with token
+_rate_limit_reset: float = 0.0  # Unix timestamp when bucket refills
+
+
+def _update_rate_limit(resp: httpx.Response) -> None:
+    """Parse rate limit headers from a GitHub API response."""
+    global _rate_limit_remaining, _rate_limit_reset
+
+    remaining = resp.headers.get("X-RateLimit-Remaining")
+    reset = resp.headers.get("X-RateLimit-Reset")
+
+    if remaining is not None:
+        _rate_limit_remaining = int(remaining)
+    if reset is not None:
+        _rate_limit_reset = float(reset)
+
+    if _rate_limit_remaining < 50:
+        wait = max(0, _rate_limit_reset - time.time())
+        logger.warning(
+            "GitHub rate limit running low: %d remaining, resets in %.0fs",
+            _rate_limit_remaining,
+            wait,
+        )
+
+
+async def _wait_if_needed() -> None:
+    """Block until rate limit resets if remaining is too low."""
+    if _rate_limit_remaining < 10:
+        wait = max(0, _rate_limit_reset - time.time()) + 1.0  # +1s safety margin
+        if wait > 0:
+            logger.warning(
+                "GitHub rate limit exhausted (%d remaining). Waiting %.0fs...",
+                _rate_limit_remaining,
+                wait,
+            )
+            await asyncio.sleep(min(wait, 120.0))  # cap at 2 min
+
 
 # Multiple search queries to discover bounty-style issues across GitHub.
 # GitHub search does NOT support OR between label: qualifiers in a single query,
@@ -76,6 +116,7 @@ async def fetch_open_bounties(
     # Run all label queries in parallel for maximum coverage.
     # GitHub search does not support OR between label: qualifiers in a single
     # query, so we issue separate requests per label.
+    # Per-page rate limit checks prevent burst-consumption of the quota.
     tasks = [
         _search_single_query(client, headers, q, max_bounties) for q in SEARCH_QUERIES
     ]
@@ -118,6 +159,8 @@ async def _search_single_query(
 
     try:
         while len(items) < max_bounties:
+            # Check rate limit before each API call
+            await _wait_if_needed()
             params = {
                 "q": query,
                 "sort": "updated",
@@ -131,6 +174,9 @@ async def _search_single_query(
                 params=params,
                 headers=headers,
             )
+
+            # Track remaining rate limit
+            _update_rate_limit(resp)
 
             if resp.status_code == 403 and "rate limit" in resp.text.lower():
                 logger.warning(
