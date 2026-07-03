@@ -1,13 +1,13 @@
 """
 LLM bounty scorer.
-Tries local Ollama first; falls back to heuristic scoring if unavailable.
+Tries OpenCode Zen → local Ollama → heuristic scoring.
 """
 
 import logging
 import re
 from typing import Any
 
-from app.config import settings
+from app.llm.client import call_llm
 
 logger = logging.getLogger("buckgen.llm")
 
@@ -68,28 +68,12 @@ async def score_bounty(bounty: dict[str, Any]) -> float:
 # LLM scorer (Ollama)
 # ---------------------------------------------------------------------------
 async def _score_with_llm(bounty: dict[str, Any]) -> float | None:
-    """Call local Ollama for LLM-based scoring.  Returns None if unavailable."""
+    """Score a bounty via OpenCode Zen → Ollama → heuristic."""
     try:
-        import httpx
-
         prompt = _build_prompt(bounty)
-        payload = {
-            "model": settings.OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 32},
-        }
-        async with httpx.AsyncClient(
-            timeout=30.0,
-            headers=settings.http_headers(),
-            proxy=settings.proxy_config(),
-        ) as client:
-            resp = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/generate",
-                json=payload,
-            )
-            resp.raise_for_status()
-            text = resp.json().get("response", "").strip()
+        text = await call_llm("score", prompt, max_tokens=32, temperature=0.1)
+        if text is None:
+            return None
 
         score = _parse_llm_score(text)
         if score is not None:
@@ -97,12 +81,6 @@ async def _score_with_llm(bounty: dict[str, Any]) -> float | None:
             return score
 
         logger.warning("LLM returned unparseable score: %s", text[:80])
-        return None
-
-    except httpx.ConnectError:
-        logger.debug(
-            "Ollama not available at %s — using heuristic", settings.OLLAMA_BASE_URL
-        )
         return None
     except Exception as exc:
         logger.debug("LLM scoring failed: %s — using heuristic", exc)

@@ -102,11 +102,23 @@ class Settings:
             f"sqlite:///{BASE_DIR / 'data' / 'buckgen.db'}",
         )
 
-        # -- LLM ------------------------------------------------------------
+        # -- LLM: OpenCode Zen (primary) ------------------------------------
+        self.ZEN_API_KEY: str = os.getenv("ZEN_API_KEY", "")
+        self.ZEN_BASE_URL: str = os.getenv("ZEN_BASE_URL", "https://opencode.ai/zen/v1")
+        # Per-task model selection — free models by default
+        self.ZEN_MODEL_SCORE: str = os.getenv(
+            "ZEN_MODEL_SCORE", "deepseek-v4-flash-free"
+        )
+        self.ZEN_MODEL_SUBMIT: str = os.getenv(
+            "ZEN_MODEL_SUBMIT", "deepseek-v4-flash-free"
+        )
+        self.ZEN_MODEL_CODE: str = os.getenv("ZEN_MODEL_CODE", "north-mini-code-free")
+
+        # -- LLM: local Ollama (fallback if Zen unavailable) ----------------
         self.OLLAMA_BASE_URL: str = os.getenv(
             "OLLAMA_BASE_URL", "http://localhost:11434"
         )
-        self.OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+        self.OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
 
         # -- Debug ----------------------------------------------------------
         self.DEBUG: bool = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")

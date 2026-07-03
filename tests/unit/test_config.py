@@ -42,6 +42,11 @@ class TestSettingsDefaults:
             "TELEGRAM_CHAT_ID",
             "OLLAMA_BASE_URL",
             "OLLAMA_MODEL",
+            "ZEN_API_KEY",
+            "ZEN_BASE_URL",
+            "ZEN_MODEL_SCORE",
+            "ZEN_MODEL_SUBMIT",
+            "ZEN_MODEL_CODE",
             "DEBUG",
             "ETH_RPC_URL",
             "BASE_RPC_URL",
@@ -77,7 +82,15 @@ class TestSettingsDefaults:
     def test_ollama_defaults(self, monkeypatch):
         s = self._make_settings(monkeypatch)
         assert s.OLLAMA_BASE_URL == "http://localhost:11434"
-        assert s.OLLAMA_MODEL == "qwen2.5:7b"
+        assert s.OLLAMA_MODEL == "qwen2.5-coder:7b"
+
+    def test_zen_defaults(self, monkeypatch):
+        s = self._make_settings(monkeypatch)
+        assert s.ZEN_API_KEY == ""
+        assert s.ZEN_BASE_URL == "https://opencode.ai/zen/v1"
+        assert s.ZEN_MODEL_SCORE == "deepseek-v4-flash-free"
+        assert s.ZEN_MODEL_SUBMIT == "deepseek-v4-flash-free"
+        assert s.ZEN_MODEL_CODE == "north-mini-code-free"
 
     def test_debug_default_false(self, monkeypatch):
         s = self._make_settings(monkeypatch)

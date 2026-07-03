@@ -64,10 +64,12 @@ services:
         sync: false
       - key: BYBIT_TRADE_SECRET
         sync: false
+      - key: ZEN_API_KEY
+        sync: false
       - key: OLLAMA_BASE_URL
         sync: false
       - key: OLLAMA_MODEL
-        value: "qwen2.5:7b"
+        value: "qwen2.5-coder:7b"
     disk:
       name: buckgen-data
       mountPath: /app/data

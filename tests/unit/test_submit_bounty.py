@@ -65,68 +65,39 @@ def _mock_httpx_client(post_kwargs: dict | None = None):
 
 
 class TestGenerateSolution:
-    """generate_solution — uses LLM or fallback template."""
+    """generate_solution — uses call_llm() or fallback template."""
 
-    @patch("app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434")
-    @patch("app.config.settings.OLLAMA_MODEL", "test-model")
     def test_llm_success(self):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"response": "Here is my solution"}
-        mock_class, _ = _mock_httpx_client({"return_value": mock_resp})
-
-        with mock_class:
+        with patch(
+            "app.modules.submit_bounty.call_llm", return_value="Here is my solution"
+        ):
             result = _run(generate_solution("Fix bug", "Login crashes", 500, "USD"))
             assert "Here is my solution" in result
 
-    @patch("app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434")
-    @patch("app.config.settings.OLLAMA_MODEL", "test-model")
-    def test_llm_http_error_falls_back(self):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_resp.text = "Server Error"
-        mock_class, _ = _mock_httpx_client({"return_value": mock_resp})
-
-        with mock_class:
-            result = _run(generate_solution("Fix bug", "Login crashes", 500, "USD"))
-            # Should get template fallback
-            assert "I'd like to work on this" in result
-
-    @patch("app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434")
-    @patch("app.config.settings.OLLAMA_MODEL", "test-model")
-    def test_llm_network_error_falls_back(self):
-        mock_class, _ = _mock_httpx_client(
-            {"side_effect": httpx.RequestError("connection failed")}
-        )
-
-        with mock_class:
+    def test_llm_unavailable_falls_back(self):
+        with patch("app.modules.submit_bounty.call_llm", return_value=None):
             result = _run(generate_solution("Fix bug", "Login crashes", 500, "USD"))
             assert "I'd like to work on this" in result
 
-    @patch("app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434")
-    @patch("app.config.settings.OLLAMA_MODEL", "test-model")
     def test_tiered_parameters_by_reward(self):
         """Higher reward bounties get more generous LLM parameters."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"response": "solution"}
-        mock_class, inst = _mock_httpx_client({"return_value": mock_resp})
-
-        with mock_class:
+        with patch(
+            "app.modules.submit_bounty.call_llm", return_value="solution"
+        ) as mock_call:
             _run(generate_solution("High", "desc", 1000, "USD"))
-            options = inst.post.call_args[1]["json"]["options"]
-            assert options["temperature"] == 0.8
-            assert options["num_predict"] == 4000
+            args, _ = mock_call.call_args
+            assert args[3] == 4000  # max_tokens
+            assert args[4] == 0.8  # temperature
 
             _run(generate_solution("Mid", "desc", 250, "USD"))
-            options = inst.post.call_args[1]["json"]["options"]
-            assert options["temperature"] == 0.7
-            assert options["num_predict"] == 2000
+            args, _ = mock_call.call_args
+            assert args[3] == 2000
+            assert args[4] == 0.7
 
             _run(generate_solution("Low", "desc", 10, "USD"))
-            options = inst.post.call_args[1]["json"]["options"]
-            assert options["temperature"] == 0.5
-            assert options["num_predict"] == 1200
+            args, _ = mock_call.call_args
+            assert args[3] == 1200
+            assert args[4] == 0.5
 
 
 # =============================================================================

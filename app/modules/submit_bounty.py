@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.models import Bounty, BountyStatus
+from app.llm.client import call_llm
 from app.utils.budget import can_spend, record_spend
 from app.utils.notify import notify_alert
 
@@ -59,8 +60,11 @@ async def generate_solution(
         temperature, max_tokens, max_words = 0.5, 1200, 400
         quality_tier = "basic"
 
-    prompt = (
-        f"You are a skilled developer responding to a paid bounty issue ({quality_tier} quality).\n\n"
+    system_prompt = (
+        f"You are a skilled developer responding to a paid bounty issue ({quality_tier} quality). "
+        "Be professional, technical, and thorough."
+    )
+    user_prompt = (
         f"BOUNTY: {title}\n"
         f"REWARD: ${reward} {currency}\n"
         f"DESCRIPTION:\n{description[:2000]}\n\n"
@@ -73,29 +77,9 @@ async def generate_solution(
         f"Keep it under {max_words} words. Include code in markdown blocks."
     )
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=90.0,
-            headers=settings.http_headers(),
-            proxy=settings.proxy_config(),
-        ) as client:
-            resp = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/generate",
-                json={
-                    "model": settings.OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": temperature, "num_predict": max_tokens},
-                },
-            )
-            if resp.status_code == 200:
-                return resp.json().get("response", "")
-            else:
-                logger.warning(
-                    "LLM returned HTTP %d: %s", resp.status_code, resp.text[:100]
-                )
-    except httpx.RequestError as exc:
-        logger.warning("LLM unavailable: %s", exc)
+    text = await call_llm("submit", user_prompt, system_prompt, max_tokens, temperature)
+    if text:
+        return text
 
     # Fallback: template-based response
     return (

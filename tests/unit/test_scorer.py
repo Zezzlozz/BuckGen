@@ -10,9 +10,8 @@ Tests cover:
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
 
 from app.llm.scorer import (
@@ -193,69 +192,33 @@ class TestScoreHeuristic:
 # =============================================================================
 
 
-def _mock_ollama(post_kwargs: dict | None = None):
-    """Mock httpx.AsyncClient for Ollama calls.
-
-    Returns ``(mock_class, mock_client_inst)``.
-    """
-    inst = MagicMock()
-    inst.__aenter__ = AsyncMock(return_value=inst)
-    inst.__aexit__ = AsyncMock(return_value=None)
-    inst.post = AsyncMock(**(post_kwargs or {}))
-    mock_class = patch("httpx.AsyncClient", return_value=inst)
-    return mock_class
-
-
 class TestScoreWithLlm:
-    """_score_with_llm — calls Ollama API and parses the response."""
+    """_score_with_llm — calls call_llm() and parses response."""
 
-    def test_successful_scoring(self, monkeypatch):
-        monkeypatch.setattr(
-            "app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434"
-        )
-        monkeypatch.setattr("app.config.settings.OLLAMA_MODEL", "test-model")
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"response": "0.85"}
-        mock_class = _mock_ollama({"return_value": mock_resp})
+    async def _mock_call_llm(self, return_value: str | None):
+        """Patch call_llm to return a given value."""
+        patcher = patch("app.llm.scorer.call_llm", return_value=return_value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return patcher
 
-        with mock_class:
+    def test_successful_scoring(self):
+        with patch("app.llm.scorer.call_llm", return_value="0.85"):
             score = _run(_score_with_llm(_make_bounty()))
             assert score == 0.85
 
-    def test_connect_error_returns_none(self, monkeypatch):
-        monkeypatch.setattr(
-            "app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434"
-        )
-        monkeypatch.setattr("app.config.settings.OLLAMA_MODEL", "test-model")
-        mock_class = _mock_ollama(
-            {"side_effect": httpx.ConnectError("connection refused")}
-        )
-
-        with mock_class:
+    def test_none_response_returns_none(self):
+        with patch("app.llm.scorer.call_llm", return_value=None):
             score = _run(_score_with_llm(_make_bounty()))
             assert score is None
 
-    def test_unparseable_response_returns_none(self, monkeypatch):
-        monkeypatch.setattr(
-            "app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434"
-        )
-        monkeypatch.setattr("app.config.settings.OLLAMA_MODEL", "test-model")
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"response": "I don't know"}
-        mock_class = _mock_ollama({"return_value": mock_resp})
-
-        with mock_class:
+    def test_unparseable_response_returns_none(self):
+        with patch("app.llm.scorer.call_llm", return_value="I don't know"):
             score = _run(_score_with_llm(_make_bounty()))
             assert score is None
 
-    def test_general_exception_returns_none(self, monkeypatch):
-        monkeypatch.setattr(
-            "app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434"
-        )
-        monkeypatch.setattr("app.config.settings.OLLAMA_MODEL", "test-model")
-        mock_class = _mock_ollama({"side_effect": RuntimeError("unexpected")})
-
-        with mock_class:
+    def test_exception_returns_none(self):
+        with patch("app.llm.scorer.call_llm", side_effect=RuntimeError("fail")):
             score = _run(_score_with_llm(_make_bounty()))
             assert score is None
 
@@ -268,26 +231,15 @@ class TestScoreWithLlm:
 class TestScoreBounty:
     """score_bounty — main entry point, tries LLM then heuristic fallback."""
 
-    def test_uses_llm_when_available(self, monkeypatch):
-        monkeypatch.setattr(
-            "app.config.settings.OLLAMA_BASE_URL", "http://localhost:11434"
-        )
-        monkeypatch.setattr("app.config.settings.OLLAMA_MODEL", "test-model")
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"response": "0.9"}
-        mock_class = _mock_ollama({"return_value": mock_resp})
-
-        with mock_class:
+    def test_uses_llm_when_available(self):
+        with patch("app.llm.scorer.call_llm", return_value="0.9"):
             score = _run(score_bounty(_make_bounty()))
-            # LLM returns 0.9, so overall score should be 0.9, not heuristic
             assert score == 0.9
 
-    def test_falls_back_to_heuristic_when_ollama_down(self):
+    def test_falls_back_to_heuristic_when_llm_unavailable(self):
         """When LLM is unavailable, heuristic score is returned."""
-        # Don't mock httpx at all — it will fail to connect, returning None
-        # from _score_with_llm, and _score_heuristic will be used.
-        score = _run(score_bounty(_make_bounty()))
-        # Heuristic score for a decent bounty should be > 0.5
-        assert 0.0 <= score <= 1.0
-        # With our test bounty data, score should be above baseline
-        assert score > 0.5
+        with patch("app.llm.scorer.call_llm", return_value=None):
+            score = _run(score_bounty(_make_bounty()))
+            assert 0.0 <= score <= 1.0
+            # With our test bounty data, score should be above baseline
+            assert score > 0.5
