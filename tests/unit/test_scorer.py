@@ -109,11 +109,11 @@ class TestBuildPrompt:
         assert "security" in prompt
 
     def test_truncates_long_description(self):
-        long_desc = "x" * 500
+        long_desc = "x" * 2000
         prompt = _build_prompt(_make_bounty(description=long_desc))
-        # The prompt uses desc[:200]
-        assert "x" * 200 in prompt
-        assert "x" * 201 not in prompt
+        # The prompt uses desc[:1500]
+        assert "x" * 1500 in prompt
+        assert "x" * 1501 not in prompt
 
     def test_includes_keywords(self):
         bounty = _make_bounty(keywords=["python", "solidity"], issue_keywords=["web3"])

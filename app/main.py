@@ -100,6 +100,7 @@ def start_scheduler() -> None:
         replace_existing=True,
         misfire_grace_time=120,
     )
+    # Stagger farm_airdrops to avoid overlapping bounty scan at :00
     scheduler.add_job(
         farm_airdrops,
         CronTrigger.from_crontab(settings.CRON_AIRDROP),
@@ -107,16 +108,18 @@ def start_scheduler() -> None:
         replace_existing=True,
         misfire_grace_time=300,
     )
+    # Stagger gas check 30 min after bounty scan to avoid :00 contention
     scheduler.add_job(
         check_gas_balances,
-        CronTrigger.from_crontab("0 */2 * * *"),  # every 2 hours
+        CronTrigger.from_crontab("30 */2 * * *"),  # every 2 hours at :30
         id="check_gas_balances",
         replace_existing=True,
         misfire_grace_time=300,
     )
+    # Stagger self_heal away from price check at :00/:30
     scheduler.add_job(
         self_heal,
-        CronTrigger.from_crontab("*/30 * * * *"),  # every 30 minutes
+        CronTrigger.from_crontab("5,35 * * * *"),  # every 30 min at :05/:35
         id="self_heal",
         replace_existing=True,
         misfire_grace_time=120,

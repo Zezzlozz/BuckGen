@@ -110,6 +110,7 @@ class TestScanBounties:
             patch("app.scheduler.jobs.score_bounty", AsyncMock(return_value=0.85)),
             patch("app.scheduler.jobs.monitor.record_success"),
             patch("app.scheduler.jobs.notify_bounty_found", AsyncMock()),
+            patch("app.scheduler.jobs.is_blacklisted", return_value=False),
         ):
             run_async(scan_bounties())
         db.add.assert_called_once()
@@ -143,6 +144,7 @@ class TestScanBounties:
             patch("app.scheduler.jobs.score_bounty", AsyncMock(return_value=0.3)),
             patch("app.scheduler.jobs.monitor.record_success"),
             patch("app.scheduler.jobs.notify_bounty_found", AsyncMock()) as mock_notify,
+            patch("app.scheduler.jobs.is_blacklisted", return_value=False),
         ):
             run_async(scan_bounties())
         mock_notify.assert_not_called()

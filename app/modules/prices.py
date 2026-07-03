@@ -41,9 +41,10 @@ logger = logging.getLogger("buckgen.prices")
 # Actual taker fees per exchange (not max):
 #   Binance: 0.1%, Coinbase: 0.4-0.6%, Kraken: 0.16%, Bybit: 0.1%
 #   KuCoin: 0.1%, OKX: 0.08%, Gate.io: 0.15%, MEXC: 0.0%
-# Most profitable CEX-CEX arb is between low-fee pairs (round-trip ~0.2%)
-# We set threshold to 0.2% to capture realistic opportunities
-MIN_PROFIT_THRESHOLD_PCT = 0.2
+# CEX-CEX arb must account for withdrawal fees, transfer time, and slippage.
+# Realistic minimum for profitable trade with <$10k capital is ~0.8-1.5%.
+# We use 0.8% to filter out noise while catching genuine opportunities.
+MIN_PROFIT_THRESHOLD_PCT = 0.8
 
 # Extensive trading pair coverage (top 100+ pairs by volume)
 DEFAULT_TRADING_PAIRS = sorted(
@@ -579,10 +580,14 @@ async def fetch_all_coingecko(
     symbols: list[str] | None = None,
 ) -> dict[str, CoinGeckoPrice]:
     """
-    Fetch CoinGecko prices for a list of symbols.
+    Fetch CoinGecko prices for a list of symbols via a single bulk API call.
+
+    Uses the ``/simple/price?ids=...`` endpoint with a comma-separated list of
+    all requested coin IDs — avoids the rate limit that sequential per-symbol
+    calls would trigger.
 
     Args:
-        symbols: e.g. ['BTC', 'ETH', 'SOL']
+        symbols: e.g. ``['BTC', 'ETH', 'SOL']``
 
     Returns:
         dict: symbol -> CoinGeckoPrice
@@ -593,15 +598,69 @@ async def fetch_all_coingecko(
     # Load coin IDs first
     ids_map = await _load_coingecko_ids()
 
-    result: dict[str, CoinGeckoPrice] = {}
+    # Build symbol → coin_id mapping
+    sym_to_id: dict[str, str] = {}
     for sym in symbols:
         coin_id = CG_SYMBOL_TO_ID.get(sym) or ids_map.get(sym)
-        if not coin_id:
+        if coin_id:
+            sym_to_id[sym] = coin_id
+
+    if not sym_to_id:
+        return {}
+
+    # Single bulk request — /simple/price accepts comma-separated IDs
+    url = f"{COINGECKO_API}/simple/price"
+    params: dict[str, str] = {
+        "ids": ",".join(sym_to_id.values()),
+        "vs_currencies": "usd",
+        "include_24hr_change": "true",
+        "include_market_cap": "true",
+        "include_24hr_vol": "true",
+    }
+
+    result: dict[str, CoinGeckoPrice] = {}
+    try:
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            headers=settings.http_headers(),
+            proxy=settings.proxy_config(),
+        ) as client:
+            resp = await client.get(url, params=params)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            for sym in symbols:
+                coin_id = sym_to_id.get(sym)
+                if coin_id and coin_id in data:
+                    cg = data[coin_id]
+                    result[sym] = CoinGeckoPrice(
+                        coin_id=coin_id,
+                        symbol=sym,
+                        usd=float(cg.get("usd", 0)),
+                        usd_24h_change=float(cg.get("usd_24h_change", 0)),
+                        usd_market_cap=float(cg.get("usd_market_cap", 0)),
+                        usd_24h_vol=float(cg.get("usd_24h_vol", 0)),
+                    )
+                else:
+                    result[sym] = CoinGeckoPrice(
+                        coin_id=coin_id or sym,
+                        symbol=sym,
+                        usd=0,
+                        error="not found in response" if coin_id else "unknown coin id",
+                    )
+        else:
+            for sym in symbols:
+                result[sym] = CoinGeckoPrice(
+                    coin_id=sym, symbol=sym, usd=0, error=f"HTTP {resp.status_code}"
+                )
+    except Exception as exc:
+        for sym in symbols:
             result[sym] = CoinGeckoPrice(
-                coin_id=sym, symbol=sym, usd=0, error="unknown coin id"
+                coin_id=sym,
+                symbol=sym,
+                usd=0,
+                error=str(exc)[:120],
             )
-            continue
-        result[sym] = await fetch_coingecko_price(coin_id)
 
     return result
 

@@ -12,17 +12,26 @@ Task types and their preferred models:
   - "code"   → north-mini-code-free  / qwen2.5-coder:7b
 """
 
+import asyncio
 import logging
+import random
 
 from app.config import settings
 
 logger = logging.getLogger("buckgen.llm")
 
-# Maps task_type → settings attr name for the Zen model
+# Maps task_type → settings attr name for the primary Zen model
 _ZEN_MODEL_ATTR: dict[str, str] = {
     "score": "ZEN_MODEL_SCORE",
     "submit": "ZEN_MODEL_SUBMIT",
     "code": "ZEN_MODEL_CODE",
+}
+
+# Fallback chains per task (tried in order if primary fails on non-auth error)
+_ZEN_FALLBACK_MODELS: dict[str, list[str]] = {
+    "score": ["mimo-v2.5-free", "north-mini-code-free"],
+    "submit": ["mimo-v2.5-free", "north-mini-code-free"],
+    "code": ["deepseek-v4-flash-free", "mimo-v2.5-free"],
 }
 
 
@@ -79,51 +88,140 @@ async def _call_zen(
     system_prompt: str,
     max_tokens: int,
     temperature: float,
+    retries: int = 2,
 ) -> str | None:
-    """Call OpenCode Zen via its OpenAI-compatible endpoint."""
+    """
+    Call OpenCode Zen via its OpenAI-compatible endpoint with retry logic.
+
+    Retries on transient errors (rate limits, 5xx, network timeouts).
+    Non-retryable errors (400, 401, 403) fail immediately.
+
+    Args:
+        task_type: One of ``"score"``, ``"submit"``, ``"code"``.
+        prompt: The user prompt.
+        system_prompt: Optional system message.
+        max_tokens: Max tokens in response.
+        temperature: LLM temperature (0.0 = deterministic).
+        retries: Number of retries on transient errors (default 2).
+
+    Returns:
+        Response text, or ``None`` on failure.
+    """
     if not settings.ZEN_API_KEY:
         logger.debug("ZEN_API_KEY not set — skipping Zen")
         return None
 
-    model = getattr(settings, _ZEN_MODEL_ATTR[task_type], "deepseek-v4-flash-free")
-    if not model:
+    primary = getattr(settings, _ZEN_MODEL_ATTR[task_type], "deepseek-v4-flash-free")
+    if not primary:
         return None
 
-    try:
-        from openai import AsyncOpenAI
+    fallbacks = _ZEN_FALLBACK_MODELS.get(task_type, [])
+    models_to_try = [primary] + fallbacks
 
-        global _zen_client
-        if _zen_client is None:
-            _zen_client = AsyncOpenAI(
-                api_key=settings.ZEN_API_KEY,
-                base_url=settings.ZEN_BASE_URL,
-                # Use httpx for consistency with the rest of the app (proxy, UA)
-                # but don't pass proxy here — let OpenAI's default transport handle it
-                # since Zen base URL is hardcoded and doesn't need proxy routing.
-            )
+    from openai import AsyncOpenAI
+    from openai import (
+        APIConnectionError,
+        APIStatusError,
+        APITimeoutError,
+        RateLimitError,
+    )
 
-        messages: list[dict] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
-        resp = await _zen_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
+    global _zen_client
+    if _zen_client is None:
+        _zen_client = AsyncOpenAI(
+            api_key=settings.ZEN_API_KEY,
+            base_url=settings.ZEN_BASE_URL,
+            # Proxy is handled by httpx's default transport — Zen base URL
+            # doesn't need explicit proxy routing.
         )
 
-        text = resp.choices[0].message.content
-        if text:
-            return text.strip()
+    messages: list[dict] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
 
-        logger.debug("Zen returned empty response")
-        return None
+    for model in models_to_try:
+        for attempt in range(retries + 1):
+            try:
+                resp = await _zen_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
 
-    except Exception as exc:
-        logger.debug("Zen call failed: %s", exc)
-        return None
+                text = resp.choices[0].message.content
+                if text:
+                    return text.strip()
+
+                logger.debug("Zen returned empty response for %s", model)
+                break  # empty response is unlikely to succeed with different model
+
+            except RateLimitError as exc:
+                logger.debug(
+                    "Zen %s rate limited (attempt %d/%d)",
+                    model,
+                    attempt + 1,
+                    retries + 1,
+                )
+                if attempt < retries:
+                    wait = (2**attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(wait)
+                    continue
+                logger.debug(
+                    "Zen %s rate limited after %d retries — trying fallback",
+                    model,
+                    retries + 1,
+                )
+
+            except (APITimeoutError, APIConnectionError) as exc:
+                logger.debug(
+                    "Zen %s network error (attempt %d/%d)",
+                    model,
+                    attempt + 1,
+                    retries + 1,
+                )
+                if attempt < retries:
+                    wait = (2**attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(wait)
+                    continue
+                logger.debug(
+                    "Zen %s unreachable after %d retries — trying fallback",
+                    model,
+                    retries + 1,
+                )
+
+            except APIStatusError as exc:
+                # 4xx auth errors are fatal — don't try other models
+                if exc.status_code in (400, 401, 403):
+                    logger.debug(
+                        "Zen auth error (HTTP %d) — not retrying", exc.status_code
+                    )
+                    return None
+                if exc.status_code >= 500 and attempt < retries:
+                    logger.debug(
+                        "Zen %s HTTP %d (attempt %d/%d)",
+                        model,
+                        exc.status_code,
+                        attempt + 1,
+                        retries + 1,
+                    )
+                    wait = (2**attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(wait)
+                    continue
+                logger.debug(
+                    "Zen %s non-retryable HTTP %d — trying fallback",
+                    model,
+                    exc.status_code,
+                )
+
+            except Exception as exc:
+                logger.debug("Zen %s unexpected error: %s", model, exc)
+
+            # If we get here, retries are exhausted — try next model
+            break
+
+    return None
 
 
 # ---------------------------------------------------------------------------

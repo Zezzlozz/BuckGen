@@ -1,10 +1,11 @@
 """
 GitHub Issues bounty scanner.
-Searches GitHub Issues API for bounty-labelled issues across web3 repos.
-Gitcoin's own API is deprecated — their bounties now live as GitHub Issues
-with the 'bounty' label on github.com/gitcoinco/web.
+Searches GitHub Issues API using multiple label-based queries to find
+bounty-labelled and reward-bearing issues across all of GitHub (not
+just known web3 repos — label search covers the entire ecosystem).
 """
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -17,16 +18,25 @@ logger = logging.getLogger("buckgen.bounties")
 
 GITHUB_API = "https://api.github.com"
 
-# Repos known to use GitHub issue labels for bounties
+# Multiple search queries to discover bounty-style issues across GitHub.
+# GitHub search does NOT support OR between label: qualifiers in a single query,
+# so we run these in parallel and merge results.
+SEARCH_QUERIES = [
+    "label:bounty is:issue is:open",
+    'label:"bug bounty" is:issue is:open',
+    "label:paid is:issue is:open",
+    "label:reward is:issue is:open",
+    "label:💰 is:issue is:open",
+]
+
+# Repos known to use GitHub issue labels for bounties (used as a secondary
+# filter — search queries above handle the primary discovery)
 BOUNTY_REPOS = [
     "gitcoinco/web",
     "keep3r-network/keep3r.network",
     "yearn/yearn-pm",
     "code-423n4/2024-*",  # C4 contests (wildcard — not directly queryable)
 ]
-
-# Label patterns that indicate paid bounties (lowercase)
-BOUNTY_LABELS = {"bounty", "💰", "paid", "reward", "bug bounty", "💸"}
 
 REWARD_REGEXES = [
     re.compile(
@@ -63,18 +73,51 @@ async def fetch_open_bounties(
     if settings.GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {settings.GITHUB_TOKEN}"
 
-    # Primary query: 'bounty' label covers the vast majority of GitHub Issues bounties
-    # GitHub search does NOT support OR between label: qualifiers in a single query,
-    # so we stick with the most effective single label for maximum coverage.
-    # Total count: ~3,256 open issues with 'bounty' label.
-    query = "label:bounty is:issue is:open"
+    # Run all label queries in parallel for maximum coverage.
+    # GitHub search does not support OR between label: qualifiers in a single
+    # query, so we issue separate requests per label.
+    tasks = [
+        _search_single_query(client, headers, q, max_bounties) for q in SEARCH_QUERIES
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    all_items: list[dict[str, Any]] = []
+    # Merge and deduplicate by issue URL
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for result in results:
+        if isinstance(result, Exception):
+            continue  # individual query failures are already logged
+        for item in result:
+            url = item.get("html_url", "")
+            if url not in seen:
+                seen.add(url)
+                merged.append(item)
+
+    logger.info(
+        "GitHub search complete: %d unique bounties from %d queries",
+        len(merged),
+        len(SEARCH_QUERIES),
+    )
+
+    if own_client:
+        await client.aclose()
+
+    return merged[:max_bounties]
+
+
+async def _search_single_query(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    query: str,
+    max_bounties: int,
+) -> list[dict[str, Any]]:
+    """Fetch all pages for a single search query."""
+    items: list[dict[str, Any]] = []
     per_page = min(max_bounties, 100)
     page = 1
 
     try:
-        while len(all_items) < max_bounties:
+        while len(items) < max_bounties:
             params = {
                 "q": query,
                 "sort": "updated",
@@ -88,47 +131,50 @@ async def fetch_open_bounties(
                 params=params,
                 headers=headers,
             )
+
             if resp.status_code == 403 and "rate limit" in resp.text.lower():
-                logger.warning("GitHub API rate limited — try setting GITHUB_TOKEN")
+                logger.warning(
+                    "GitHub API rate limited on query %r — try setting GITHUB_TOKEN",
+                    query,
+                )
                 break
 
             resp.raise_for_status()
             data = resp.json()
-            items = data.get("items", [])
-            all_items.extend(items)
+            batch = data.get("items", [])
+            items.extend(batch)
 
-            logger.info(
-                "GitHub search page %d: %d items (total fetched: %d / %s total count)",
+            logger.debug(
+                "GitHub search %r page %d: %d items (total: %d / %s)",
+                query,
                 page,
+                len(batch),
                 len(items),
-                len(all_items),
                 data.get("total_count", "?"),
             )
 
-            # Stop if no more pages
-            if len(items) < per_page:
+            if len(batch) < per_page:
                 break
 
-            # Stop if we've exhausted available results
             total_count = data.get("total_count", 0)
-            if total_count and len(all_items) >= total_count:
+            if total_count and len(items) >= total_count:
                 break
 
             page += 1
 
-        return all_items[:max_bounties]
+        return items
 
     except httpx.HTTPStatusError as exc:
         logger.error(
-            "GitHub API HTTP %d: %s", exc.response.status_code, exc.response.text[:200]
+            "GitHub API HTTP %d on query %r: %s",
+            exc.response.status_code,
+            query,
+            exc.response.text[:200],
         )
-        return all_items  # return what we have so far
+        return items
     except httpx.RequestError as exc:
-        logger.error("GitHub request failed: %s", exc)
-        return all_items
-    finally:
-        if own_client:
-            await client.aclose()
+        logger.error("GitHub request failed on query %r: %s", query, exc)
+        return items
 
 
 def normalize_bounty(raw: dict[str, Any]) -> dict[str, Any]:

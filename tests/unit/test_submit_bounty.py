@@ -4,7 +4,7 @@ Unit tests for Bounty Submission Module (app/modules/submit_bounty.py).
 Tests cover:
   - generate_solution: LLM success, LLM unavailable fallback, tiered parameters
   - _github_request: success, server error with retry, missing token
-  - create_fork, create_pull_request, post_comment: delegation to _github_request
+  - post_comment: delegation to _github_request
   - submit_bounty: full flow, errors (not found, wrong status, budget, URL parse, comment fail)
   - submit_top_bounties: query and sequential submission
 """
@@ -74,10 +74,10 @@ class TestGenerateSolution:
             result = _run(generate_solution("Fix bug", "Login crashes", 500, "USD"))
             assert "Here is my solution" in result
 
-    def test_llm_unavailable_falls_back(self):
+    def test_llm_unavailable_returns_empty(self):
         with patch("app.modules.submit_bounty.call_llm", return_value=None):
             result = _run(generate_solution("Fix bug", "Login crashes", 500, "USD"))
-            assert "I'd like to work on this" in result
+            assert result == ""
 
     def test_tiered_parameters_by_reward(self):
         """Higher reward bounties get more generous LLM parameters."""
@@ -271,6 +271,7 @@ class TestSubmitBounty:
             assert result["repo"] == "owner/repo"
             assert result["issue_number"] == 42
             assert "solution_preview" in result
+            assert "pr_created" not in result
 
         # Status should be updated to APPLIED
         db_session.refresh(bounty)

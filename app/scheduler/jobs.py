@@ -13,6 +13,7 @@ from app.db.models import Bounty, BountyPlatform, BountyStatus, Wallet, get_sess
 from app.llm.scorer import score_bounty
 from app.modules import gitcoin  # GitHub Issues bounty scanner
 from app.modules.system import monitor
+from app.utils.blacklist import is_blacklisted
 from app.utils.notify import notify_alert, notify_bounty_found, notify_error
 
 logger = logging.getLogger("buckgen.jobs")
@@ -61,6 +62,26 @@ async def scan_bounties() -> None:
         logger.info(
             "[bounty] %d new bounties to score out of %d", len(new_norms), len(norms)
         )
+
+        # ---- Filter blacklisted repos ----
+        before = len(new_norms)
+        new_norms = [
+            n
+            for n in new_norms
+            if not is_blacklisted(db, "repo", n.get("repo", ""))
+            and not is_blacklisted(db, "bounty", n.get("url", ""))
+        ]
+        if before != len(new_norms):
+            logger.info(
+                "[bounty] Filtered %d blacklisted bounties, %d remaining",
+                before - len(new_norms),
+                len(new_norms),
+            )
+
+        if not new_norms:
+            logger.info("[bounty] All new bounties blacklisted — skipping")
+            monitor.record_success("bounties")
+            return
 
         # ---- Parallel LLM scoring ----
         score_tasks = [score_bounty(n) for n in new_norms]

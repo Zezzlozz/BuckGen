@@ -78,8 +78,15 @@ class TestFetchOpenBounties:
             mock_client_class.return_value = inst
             yield inst, fetch_open_bounties, max_bounties
 
+    def _mock_inst(self, mock_client_class):
+        """Set up a common mock client instance."""
+        inst = MagicMock()
+        inst.aclose = AsyncMock()
+        mock_client_class.return_value = inst
+        return inst
+
     def test_fetches_single_page(self):
-        from app.modules.gitcoin import fetch_open_bounties
+        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
 
         with (
             patch("app.config.settings") as mock_settings,
@@ -87,24 +94,40 @@ class TestFetchOpenBounties:
         ):
             mock_settings.GITHUB_TOKEN = "test_token"
 
-            inst = MagicMock()
-            inst.aclose = AsyncMock()
-            mock_client_class.return_value = inst
-
+            inst = self._mock_inst(mock_client_class)
             resp = _mock_response(
                 json_data={
                     "items": [_make_github_issue(1)],
                     "total_count": 1,
                 }
             )
-            inst.get = AsyncMock(return_value=resp)
+            # Each query makes one page request; side_effect handles all calls
+            inst.get = AsyncMock(side_effect=[resp] * len(SEARCH_QUERIES))
 
             result = _run_async(fetch_open_bounties(max_bounties=10))
             assert len(result) == 1
             assert result[0]["title"] == "Test Bounty"
 
+    def test_deduplicates_across_queries(self):
+        """Same issue returned by multiple label queries should appear once."""
+        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
+
+        issue = _make_github_issue(1, "Test Bounty")
+        with (
+            patch("app.config.settings") as mock_settings,
+            patch("httpx.AsyncClient") as mock_client_class,
+        ):
+            mock_settings.GITHUB_TOKEN = "test_token"
+
+            inst = self._mock_inst(mock_client_class)
+            resp = _mock_response(json_data={"items": [issue], "total_count": 1})
+            inst.get = AsyncMock(side_effect=[resp] * len(SEARCH_QUERIES))
+
+            result = _run_async(fetch_open_bounties(max_bounties=10))
+            assert len(result) == 1  # deduplicated
+
     def test_paginates_across_pages(self):
-        from app.modules.gitcoin import fetch_open_bounties
+        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
 
         with (
             patch("app.config.settings") as mock_settings,
@@ -112,9 +135,7 @@ class TestFetchOpenBounties:
         ):
             mock_settings.GITHUB_TOKEN = "test_token"
 
-            inst = MagicMock()
-            inst.aclose = AsyncMock()
-            mock_client_class.return_value = inst
+            inst = self._mock_inst(mock_client_class)
 
             page_1 = _mock_response(
                 json_data={
@@ -122,19 +143,18 @@ class TestFetchOpenBounties:
                     "total_count": 4,
                 }
             )
-            page_2 = _mock_response(
-                json_data={
-                    "items": [],
-                    "total_count": 4,
-                }
-            )
-            inst.get = AsyncMock(side_effect=[page_1, page_2])
+            page_2 = _mock_response(json_data={"items": [], "total_count": 4})
+            # Each query gets 2 pages: first returns 4 items, second returns empty
+            pages = []
+            for _ in range(len(SEARCH_QUERIES)):
+                pages.extend([page_1, page_2])
+            inst.get = AsyncMock(side_effect=pages)
 
             result = _run_async(fetch_open_bounties(max_bounties=4))
             assert len(result) == 4
 
-    def test_rate_limited_returns_what_it_has(self):
-        from app.modules.gitcoin import fetch_open_bounties
+    def test_rate_limited_returns_empty(self):
+        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
 
         with (
             patch("app.config.settings") as mock_settings,
@@ -142,19 +162,17 @@ class TestFetchOpenBounties:
         ):
             mock_settings.GITHUB_TOKEN = None
 
-            inst = MagicMock()
-            inst.aclose = AsyncMock()
-            mock_client_class.return_value = inst
-
+            inst = self._mock_inst(mock_client_class)
             resp = _mock_response(status_code=403, json_data={})
             resp.text = "rate limit exceeded"
-            inst.get = AsyncMock(return_value=resp)
+            inst.get = AsyncMock(side_effect=[resp] * len(SEARCH_QUERIES))
 
             result = _run_async(fetch_open_bounties(max_bounties=10))
             assert result == []
 
-    def test_network_error_returns_empty(self):
-        from app.modules.gitcoin import fetch_open_bounties
+    def test_partial_query_failure(self):
+        """If one query fails, others still return results."""
+        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
 
         with (
             patch("app.config.settings") as mock_settings,
@@ -162,10 +180,38 @@ class TestFetchOpenBounties:
         ):
             mock_settings.GITHUB_TOKEN = "test_token"
 
-            inst = MagicMock()
-            inst.aclose = AsyncMock()
-            mock_client_class.return_value = inst
-            inst.get = AsyncMock(side_effect=httpx.RequestError("connection failed"))
+            inst = self._mock_inst(mock_client_class)
+
+            good_resp = _mock_response(
+                json_data={
+                    "items": [_make_github_issue(1)],
+                    "total_count": 1,
+                }
+            )
+            bad_resp = _mock_response(status_code=500, json_data={})
+            # Mix of failures and successes
+            effects = [bad_resp, good_resp] * (len(SEARCH_QUERIES) // 2)
+            if len(effects) < len(SEARCH_QUERIES):
+                effects.append(good_resp)
+            inst.get = AsyncMock(side_effect=effects)
+
+            result = _run_async(fetch_open_bounties(max_bounties=10))
+            assert len(result) >= 1  # at least the one from successful queries
+
+    def test_network_error_returns_empty(self):
+        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
+
+        with (
+            patch("app.config.settings") as mock_settings,
+            patch("httpx.AsyncClient") as mock_client_class,
+        ):
+            mock_settings.GITHUB_TOKEN = "test_token"
+
+            inst = self._mock_inst(mock_client_class)
+            inst.get = AsyncMock(
+                side_effect=[httpx.RequestError("connection failed")]
+                * len(SEARCH_QUERIES)
+            )
 
             result = _run_async(fetch_open_bounties(max_bounties=10))
             assert result == []
