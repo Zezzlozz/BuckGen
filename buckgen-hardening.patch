@@ -1,0 +1,274 @@
+diff --git a/app/main.py b/app/main.py
+index 50992f8..b7e589d 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -3,6 +3,7 @@ FastAPI application entry point.
+ Initialises database, scheduler, and exposes health/liveness endpoints.
+ """
+ 
++import hmac
+ import logging
+ from contextlib import asynccontextmanager
+ from datetime import UTC, datetime
+@@ -61,11 +62,25 @@ def _redact_db_url(url: str) -> str:
+ 
+ 
+ def _require_api_key(request: Request) -> None:
+-    """Dependency: require X-API-Key header matching settings.API_KEY."""
++    """Dependency: require X-API-Key header matching settings.API_KEY.
++
++    Fails CLOSED: if no API_KEY is configured, requests are refused in
++    production. Only DEBUG mode allows unauthenticated access, and even
++    then it is logged loudly.
++    """
+     if not settings.API_KEY:
+-        return  # No API key configured — allow all requests (dev mode)
++        if settings.DEBUG:
++            logger.warning(
++                "API_KEY unset — allowing unauthenticated request (DEBUG only)"
++            )
++            return
++        raise HTTPException(
++            status_code=503,
++            detail="Server misconfigured: API_KEY not set. Refusing requests.",
++        )
+     api_key = request.headers.get("X-API-Key", "")
+-    if api_key != settings.API_KEY:
++    # Constant-time comparison to avoid timing side channels on the secret.
++    if not hmac.compare_digest(api_key, settings.API_KEY):
+         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+ 
+ 
+@@ -141,6 +156,13 @@ def start_scheduler() -> None:
+ async def lifespan(app: FastAPI):
+     """Startup / shutdown."""
+     # ---- Startup ---------------------------------------------------------
++    # Refuse to boot a wallet-controlling service with no auth in production.
++    if not settings.API_KEY and not settings.DEBUG:
++        raise RuntimeError(
++            "Refusing to start without API_KEY set. This service can move "
++            "funds; set API_KEY, or run with DEBUG=true for local dev only."
++        )
++
+     missing = settings.validate()
+     if missing:
+         logger.warning("Missing config values: %s", ", ".join(missing))
+@@ -433,12 +455,13 @@ async def trade_swap(
+     to_token: str = Query(default="", max_length=100),
+     amount_wei: str = Query(default="", max_length=100),
+     amount_eur: float = Query(default=0.0, ge=0.0),
++    confirm: bool = Query(default=False),
+ ) -> dict:
+     """
+     Execute a token swap via 1inch using the agent's HD wallet.
+ 
+-    For safety, defaults to dry-run mode.
+-    Set confirm=true to actually submit.
++    For safety, defaults to dry-run mode (confirm=false): returns a preview
++    without signing or broadcasting. Set confirm=true to actually submit.
+     """
+     from app.modules.defi import execute_swap
+ 
+@@ -452,6 +475,7 @@ async def trade_swap(
+             to_token=to_token,
+             amount_wei=amount_wei,
+             amount_eur_estimate=amount_eur,
++            confirm=confirm,
+         )
+         return {
+             "success": result.success,
+@@ -471,9 +495,12 @@ async def trade_arbitrage(
+     _: None = Depends(_require_api_key),
+     chain: str = Query(default="ethereum", min_length=2, max_length=20),
+     capital_eur: float = Query(default=500.0, ge=0.0, le=100000.0),
++    confirm: bool = Query(default=False),
+ ) -> dict:
+     """
+     Execute the best detected arbitrage opportunity on a given chain.
++
++    Defaults to dry-run (confirm=false). Set confirm=true to place orders.
+     """
+     from app.modules.defi import execute_arbitrage
+     from app.modules.prices import check_all_prices
+@@ -492,6 +519,7 @@ async def trade_arbitrage(
+             chain=chain,
+             opportunity=opportunities[0],
+             capital_eur=capital_eur,
++            confirm=confirm,
+         )
+         return result
+     finally:
+diff --git a/app/modules/airdrop.py b/app/modules/airdrop.py
+index 71ec2f6..b50635f 100644
+--- a/app/modules/airdrop.py
++++ b/app/modules/airdrop.py
+@@ -826,7 +826,7 @@ async def batch_create_wallets(
+ 
+     db.commit()
+     logger.info(
+-        "Created %d disposable wallets across %d chains",
++        "Created %d disposable wallets across %d chains (indices %d-%d)",
+         len(wallets),
+         len(chains),
+         start_index,
+diff --git a/app/modules/defi.py b/app/modules/defi.py
+index a96c16f..5671d4e 100644
+--- a/app/modules/defi.py
++++ b/app/modules/defi.py
+@@ -245,12 +245,14 @@ async def execute_swap(
+     to_token: str = "",
+     amount_wei: str = "",
+     amount_eur_estimate: float = 0.0,
++    confirm: bool = False,
+ ) -> SwapResult:
+     """
+     Execute a token swap via 1inch using the agent's HD wallet.
+ 
+-    This is a dry-run ready function — it checks budget, builds the tx,
+-    signs it, and submits it to the chain.
++    Checks budget, builds the tx, and — ONLY if ``confirm=True`` — signs
++    and broadcasts it. With ``confirm=False`` (the default) it returns a
++    non-submitted preview and never touches the chain.
+ 
+     Args:
+         db: Database session
+@@ -329,6 +331,25 @@ async def execute_swap(
+             error="No RPC connection",
+         )
+ 
++    # --- Dry-run gate: never broadcast without explicit confirm ---
++    if not confirm:
++        logger.info(
++            "DRY-RUN swap on %s: %s -> %s amount=%s (set confirm=true to submit)",
++            chain,
++            from_token,
++            to_token,
++            amount_wei,
++        )
++        return SwapResult(
++            success=False,
++            tx_hash="",
++            from_token=from_token,
++            to_token=to_token,
++            from_amount=int(amount_wei or 0),
++            to_amount=0,
++            error="dry_run: not submitted (confirm=false)",
++        )
++
+     # --- Prepare and sign transaction ---
+     try:
+         tx = {
+@@ -491,6 +512,7 @@ async def execute_cex_arbitrage(
+     db: Session,
+     opportunity: dict,
+     capital_eur: float = 500.0,
++    confirm: bool = False,
+ ) -> dict:
+     """
+     Execute a CEX-CEX arbitrage opportunity by placing market orders
+@@ -579,6 +601,24 @@ async def execute_cex_arbitrage(
+             buy_exchange_name,
+         )
+ 
++        # --- Dry-run gate: never place live orders without explicit confirm ---
++        if not confirm:
++            logger.info(
++                "DRY-RUN CEX arb: would BUY %.4f %s on %s / SELL on %s "
++                "(set confirm=true to place orders)",
++                trade_size_base,
++                pair,
++                buy_exchange_name,
++                sell_exchange_name,
++            )
++            return {
++                "success": False,
++                "error": "dry_run: not submitted (confirm=false)",
++                "would_trade_base": trade_size_base,
++                "would_trade_quote": trade_size_quote,
++                "pair": pair,
++            }
++
+         # Record the spend for budget tracking
+         record_spend(
+             db,
+@@ -714,10 +754,13 @@ async def execute_arbitrage(
+     chain: str,
+     opportunity: dict,
+     capital_eur: float = 500.0,
++    confirm: bool = False,
+ ) -> dict:
+     """
+     Execute an arbitrage opportunity — routes to the appropriate executor.
+ 
++    Broadcasts only when ``confirm=True``; otherwise returns a preview.
++
+     For CEX-CEX opportunities (buy_at/sell_at are exchange names like "binance"),
+     uses ccxt trade API keys to place market orders.
+ 
+@@ -750,7 +793,7 @@ async def execute_arbitrage(
+     is_cex_cex = buy_at in cex_names and sell_at in cex_names
+ 
+     if is_cex_cex:
+-        return await execute_cex_arbitrage(db, opportunity, capital_eur)
++        return await execute_cex_arbitrage(db, opportunity, capital_eur, confirm=confirm)
+ 
+     # Fallback: on-chain swap via 1inch
+     logger.info("[defi] On-chain arb: swapping on %s", chain)
+@@ -788,6 +831,7 @@ async def execute_arbitrage(
+         to_token=usdc,
+         amount_wei=str(max_trade),
+         amount_eur_estimate=capital_eur * 0.02,
++        confirm=confirm,
+     )
+ 
+     if result.success:
+diff --git a/app/modules/wallet.py b/app/modules/wallet.py
+index 10b3ce3..d08cf45 100644
+--- a/app/modules/wallet.py
++++ b/app/modules/wallet.py
+@@ -220,8 +220,16 @@ def get_private_key_for_path(path: str) -> bytes | None:
+ # Shutdown
+ # ---------------------------------------------------------------------------
+ def zero_keyring() -> None:
+-    """Zero all private keys in memory. Call on application shutdown."""
+-    for path, account in _keyring.items():
+-        zero_bytes(account.key)
++    """Drop all in-memory keys on shutdown.
++
++    Note: eth_account's ``account.key`` is immutable ``bytes``, so the
++    underlying buffer cannot be overwritten in place. We can only release
++    references and prompt garbage collection — this is NOT guaranteed
++    secure erasure, and should not be advertised as such.
++    """
++    count = len(_keyring)
+     _keyring.clear()
+-    logger.info("Keyring zeroed and cleared")
++    import gc
++
++    gc.collect()
++    logger.info("Keyring references dropped (%d cleared)", count)
+diff --git a/app/utils/crypto.py b/app/utils/crypto.py
+index d18d8bf..300d4b1 100644
+--- a/app/utils/crypto.py
++++ b/app/utils/crypto.py
+@@ -44,9 +44,17 @@ def decrypt_env(payload: str, password: str) -> str:
+     return plaintext.decode()
+ 
+ 
+-def zero_bytes(b: bytearray | bytes) -> None:
+-    """Overwrite byte content with zeros to prevent memory scraping."""
++def zero_bytes(b: bytearray) -> None:
++    """Overwrite a MUTABLE bytearray in place to reduce memory-scraping window.
++
++    Immutable ``bytes`` cannot be zeroed in place: copying into a new
++    bytearray and zeroing the copy leaves the original untouched, which
++    is a false sense of security. Callers must pass a bytearray.
++    """
+     if isinstance(b, bytes):
+-        b = bytearray(b)
++        raise TypeError(
++            "zero_bytes requires a mutable bytearray; immutable bytes "
++            "cannot be scrubbed in place."
++        )
+     for i in range(len(b)):
+         b[i] = 0

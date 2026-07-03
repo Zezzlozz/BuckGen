@@ -220,8 +220,16 @@ def get_private_key_for_path(path: str) -> bytes | None:
 # Shutdown
 # ---------------------------------------------------------------------------
 def zero_keyring() -> None:
-    """Zero all private keys in memory. Call on application shutdown."""
-    for path, account in _keyring.items():
-        zero_bytes(account.key)
+    """Drop all in-memory keys on shutdown.
+
+    Note: eth_account's ``account.key`` is immutable ``bytes``, so the
+    underlying buffer cannot be overwritten in place. We can only release
+    references and prompt garbage collection — this is NOT guaranteed
+    secure erasure, and should not be advertised as such.
+    """
+    count = len(_keyring)
     _keyring.clear()
-    logger.info("Keyring zeroed and cleared")
+    import gc
+
+    gc.collect()
+    logger.info("Keyring references dropped (%d cleared)", count)

@@ -44,9 +44,17 @@ def decrypt_env(payload: str, password: str) -> str:
     return plaintext.decode()
 
 
-def zero_bytes(b: bytearray | bytes) -> None:
-    """Overwrite byte content with zeros to prevent memory scraping."""
+def zero_bytes(b: bytearray) -> None:
+    """Overwrite a MUTABLE bytearray in place to reduce memory-scraping window.
+
+    Immutable ``bytes`` cannot be zeroed in place: copying into a new
+    bytearray and zeroing the copy leaves the original untouched, which
+    is a false sense of security. Callers must pass a bytearray.
+    """
     if isinstance(b, bytes):
-        b = bytearray(b)
+        raise TypeError(
+            "zero_bytes requires a mutable bytearray; immutable bytes "
+            "cannot be scrubbed in place."
+        )
     for i in range(len(b)):
         b[i] = 0

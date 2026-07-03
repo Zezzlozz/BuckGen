@@ -245,12 +245,14 @@ async def execute_swap(
     to_token: str = "",
     amount_wei: str = "",
     amount_eur_estimate: float = 0.0,
+    confirm: bool = False,
 ) -> SwapResult:
     """
     Execute a token swap via 1inch using the agent's HD wallet.
 
-    This is a dry-run ready function — it checks budget, builds the tx,
-    signs it, and submits it to the chain.
+    Checks budget, builds the tx, and — ONLY if ``confirm=True`` — signs
+    and broadcasts it. With ``confirm=False`` (the default) it returns a
+    non-submitted preview and never touches the chain.
 
     Args:
         db: Database session
@@ -327,6 +329,25 @@ async def execute_swap(
             from_amount=0,
             to_amount=0,
             error="No RPC connection",
+        )
+
+    # --- Dry-run gate: never broadcast without explicit confirm ---
+    if not confirm:
+        logger.info(
+            "DRY-RUN swap on %s: %s -> %s amount=%s (set confirm=true to submit)",
+            chain,
+            from_token,
+            to_token,
+            amount_wei,
+        )
+        return SwapResult(
+            success=False,
+            tx_hash="",
+            from_token=from_token,
+            to_token=to_token,
+            from_amount=int(amount_wei or 0),
+            to_amount=0,
+            error="dry_run: not submitted (confirm=false)",
         )
 
     # --- Prepare and sign transaction ---
@@ -491,6 +512,7 @@ async def execute_cex_arbitrage(
     db: Session,
     opportunity: dict,
     capital_eur: float = 500.0,
+    confirm: bool = False,
 ) -> dict:
     """
     Execute a CEX-CEX arbitrage opportunity by placing market orders
@@ -578,6 +600,24 @@ async def execute_cex_arbitrage(
             quote,
             buy_exchange_name,
         )
+
+        # --- Dry-run gate: never place live orders without explicit confirm ---
+        if not confirm:
+            logger.info(
+                "DRY-RUN CEX arb: would BUY %.4f %s on %s / SELL on %s "
+                "(set confirm=true to place orders)",
+                trade_size_base,
+                pair,
+                buy_exchange_name,
+                sell_exchange_name,
+            )
+            return {
+                "success": False,
+                "error": "dry_run: not submitted (confirm=false)",
+                "would_trade_base": trade_size_base,
+                "would_trade_quote": trade_size_quote,
+                "pair": pair,
+            }
 
         # Record the spend for budget tracking
         record_spend(
@@ -714,9 +754,12 @@ async def execute_arbitrage(
     chain: str,
     opportunity: dict,
     capital_eur: float = 500.0,
+    confirm: bool = False,
 ) -> dict:
     """
     Execute an arbitrage opportunity — routes to the appropriate executor.
+
+    Broadcasts only when ``confirm=True``; otherwise returns a preview.
 
     For CEX-CEX opportunities (buy_at/sell_at are exchange names like "binance"),
     uses ccxt trade API keys to place market orders.
@@ -750,7 +793,7 @@ async def execute_arbitrage(
     is_cex_cex = buy_at in cex_names and sell_at in cex_names
 
     if is_cex_cex:
-        return await execute_cex_arbitrage(db, opportunity, capital_eur)
+        return await execute_cex_arbitrage(db, opportunity, capital_eur, confirm=confirm)
 
     # Fallback: on-chain swap via 1inch
     logger.info("[defi] On-chain arb: swapping on %s", chain)
@@ -788,6 +831,7 @@ async def execute_arbitrage(
         to_token=usdc,
         amount_wei=str(max_trade),
         amount_eur_estimate=capital_eur * 0.02,
+        confirm=confirm,
     )
 
     if result.success:

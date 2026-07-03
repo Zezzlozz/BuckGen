@@ -826,7 +826,7 @@ async def batch_create_wallets(
 
     db.commit()
     logger.info(
-        "Created %d disposable wallets across %d chains",
+        "Created %d disposable wallets across %d chains (indices %d-%d)",
         len(wallets),
         len(chains),
         start_index,

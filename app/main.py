@@ -3,6 +3,7 @@ FastAPI application entry point.
 Initialises database, scheduler, and exposes health/liveness endpoints.
 """
 
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -61,11 +62,25 @@ def _redact_db_url(url: str) -> str:
 
 
 def _require_api_key(request: Request) -> None:
-    """Dependency: require X-API-Key header matching settings.API_KEY."""
+    """Dependency: require X-API-Key header matching settings.API_KEY.
+
+    Fails CLOSED: if no API_KEY is configured, requests are refused in
+    production. Only DEBUG mode allows unauthenticated access, and even
+    then it is logged loudly.
+    """
     if not settings.API_KEY:
-        return  # No API key configured — allow all requests (dev mode)
+        if settings.DEBUG:
+            logger.warning(
+                "API_KEY unset — allowing unauthenticated request (DEBUG only)"
+            )
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="Server misconfigured: API_KEY not set. Refusing requests.",
+        )
     api_key = request.headers.get("X-API-Key", "")
-    if api_key != settings.API_KEY:
+    # Constant-time comparison to avoid timing side channels on the secret.
+    if not hmac.compare_digest(api_key, settings.API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -141,6 +156,13 @@ def start_scheduler() -> None:
 async def lifespan(app: FastAPI):
     """Startup / shutdown."""
     # ---- Startup ---------------------------------------------------------
+    # Refuse to boot a wallet-controlling service with no auth in production.
+    if not settings.API_KEY and not settings.DEBUG:
+        raise RuntimeError(
+            "Refusing to start without API_KEY set. This service can move "
+            "funds; set API_KEY, or run with DEBUG=true for local dev only."
+        )
+
     missing = settings.validate()
     if missing:
         logger.warning("Missing config values: %s", ", ".join(missing))
@@ -433,12 +455,13 @@ async def trade_swap(
     to_token: str = Query(default="", max_length=100),
     amount_wei: str = Query(default="", max_length=100),
     amount_eur: float = Query(default=0.0, ge=0.0),
+    confirm: bool = Query(default=False),
 ) -> dict:
     """
     Execute a token swap via 1inch using the agent's HD wallet.
 
-    For safety, defaults to dry-run mode.
-    Set confirm=true to actually submit.
+    For safety, defaults to dry-run mode (confirm=false): returns a preview
+    without signing or broadcasting. Set confirm=true to actually submit.
     """
     from app.modules.defi import execute_swap
 
@@ -452,6 +475,7 @@ async def trade_swap(
             to_token=to_token,
             amount_wei=amount_wei,
             amount_eur_estimate=amount_eur,
+            confirm=confirm,
         )
         return {
             "success": result.success,
@@ -471,9 +495,12 @@ async def trade_arbitrage(
     _: None = Depends(_require_api_key),
     chain: str = Query(default="ethereum", min_length=2, max_length=20),
     capital_eur: float = Query(default=500.0, ge=0.0, le=100000.0),
+    confirm: bool = Query(default=False),
 ) -> dict:
     """
     Execute the best detected arbitrage opportunity on a given chain.
+
+    Defaults to dry-run (confirm=false). Set confirm=true to place orders.
     """
     from app.modules.defi import execute_arbitrage
     from app.modules.prices import check_all_prices
@@ -492,6 +519,7 @@ async def trade_arbitrage(
             chain=chain,
             opportunity=opportunities[0],
             capital_eur=capital_eur,
+            confirm=confirm,
         )
         return result
     finally:
