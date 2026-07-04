@@ -29,7 +29,7 @@ async def send_telegram(message: str, parse_mode: str = "Markdown") -> bool:
 
     try:
         async with httpx.AsyncClient(
-            timeout=15.0,
+            timeout=settings.HTTP_TIMEOUT,
             headers=settings.http_headers(),
             proxy=settings.proxy_config(),
         ) as client:

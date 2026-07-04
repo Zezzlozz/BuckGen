@@ -12,14 +12,15 @@ Tests cover:
 """
 
 import asyncio
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from app.modules.defi import (
     _get_trade_exchange,
-    execute_cex_arbitrage,
-    execute_arbitrage,
     _trade_exchanges,
+    execute_arbitrage,
+    execute_cex_arbitrage,
 )
 
 
@@ -149,7 +150,7 @@ class TestExecuteCexArbitrage:
         mock_sell = MagicMock()
         mock_get_ex.side_effect = [mock_buy, mock_sell]
         opp = self._make_opportunity()
-        result = _run(execute_cex_arbitrage(db_session, opp))
+        result = _run(execute_cex_arbitrage(db_session, opp, confirm=True))
         assert result["success"] is False
         assert "not filled" in result["error"]
 
@@ -162,7 +163,7 @@ class TestExecuteCexArbitrage:
         mock_sell.create_market_sell_order.return_value = {"filled": 0, "cost": 0}
         mock_get_ex.side_effect = [mock_buy, mock_sell]
         opp = self._make_opportunity()
-        result = _run(execute_cex_arbitrage(db_session, opp))
+        result = _run(execute_cex_arbitrage(db_session, opp, confirm=True))
         assert result["success"] is False
         assert "not filled" in result["error"]
 
@@ -184,7 +185,7 @@ class TestExecuteCexArbitrage:
         }
         mock_get_ex.side_effect = [mock_buy, mock_sell]
         opp = self._make_opportunity(buy_price=opp_price, sell_price=opp_price)
-        result = _run(execute_cex_arbitrage(db_session, opp))
+        result = _run(execute_cex_arbitrage(db_session, opp, confirm=True))
         assert result.get("success") is True
         assert "not profitable" in result.get("warning", "")
 
@@ -205,7 +206,7 @@ class TestExecuteCexArbitrage:
         }
         mock_get_ex.side_effect = [mock_buy, mock_sell]
         opp = self._make_opportunity()
-        result = _run(execute_cex_arbitrage(db_session, opp))
+        result = _run(execute_cex_arbitrage(db_session, opp, confirm=True))
         assert result["success"] is True
         assert result["net_profit_eur"] > 0
         from app.utils.pnl import module_revenue
@@ -230,7 +231,7 @@ class TestExecuteCexArbitrage:
         }
         mock_get_ex.side_effect = [mock_buy, mock_sell]
         opp = self._make_opportunity()
-        result = _run(execute_cex_arbitrage(db_session, opp))
+        result = _run(execute_cex_arbitrage(db_session, opp, confirm=True))
         assert result["buy_exchange"] == "binance"
         assert result["sell_exchange"] == "kraken"
         assert result["pair"] == "BTC/USDT"
@@ -257,11 +258,11 @@ class TestExecuteArbitrage:
             "sell_price": 101,
         }
         result = _run(execute_arbitrage(db_session, "ethereum", opportunity))
-        mock_cex.assert_called_once_with(db_session, opportunity, 500.0)
+        mock_cex.assert_called_once_with(db_session, opportunity, 500.0, confirm=False)
         assert result["success"] is True
 
     def test_cex_names_are_reused(self, db_session):
-        from app.modules.prices import EXCHANGE_FEES
+        from app.modules.prices import _EXCHANGE_FEES_STATIC
 
         cex_names = {
             "binance",
@@ -273,7 +274,7 @@ class TestExecuteArbitrage:
             "gate",
             "mexc",
         }
-        for ex in EXCHANGE_FEES:
+        for ex in _EXCHANGE_FEES_STATIC:
             assert ex in cex_names, (
                 f"Exchange '{ex}' has a fee config but is not in cex_names"
             )

@@ -14,19 +14,17 @@ Tests cover:
 import pytest
 from eth_account.signers.local import LocalAccount
 
+from app.db.models import Wallet, WalletType
 from app.modules.wallet import (
     _bip44_path,
-    derive_wallet,
-    get_wallet,
-    get_all_wallets,
-    sync_wallet_to_db,
     derive_and_sync_batch,
+    derive_wallet,
+    get_all_wallets,
     get_private_key,
+    get_wallet,
+    sync_wallet_to_db,
     zero_keyring,
-    CHAIN_CONFIGS,
 )
-from app.db.models import Wallet, WalletType
-
 
 # =============================================================================
 # Known addresses for the Hardhat test mnemonic:

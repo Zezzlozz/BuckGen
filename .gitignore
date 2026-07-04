@@ -28,3 +28,7 @@ Thumbs.db
 # Secrets
 .env.encrypted
 *.key
+
+# Backups
+app.backup/
+.env.example.backup

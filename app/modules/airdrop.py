@@ -435,7 +435,7 @@ FAUCET_REGISTRY: list[FaucetInfo] = [
 _recent_claims: dict[str, float] = {}  # faucet_name -> timestamp
 
 # Faucet health tracking — circuit breaker to skip dead faucets
-FAUCET_CIRCUIT_BREAKER = 5  # disable after this many consecutive failures
+FAUCET_CIRCUIT_BREAKER = settings.FAUCET_CIRCUIT_BREAKER
 _faucet_health: dict[
     str, dict
 ] = {}  # faucet_name -> {"consecutive_failures": int, "disabled": bool}
@@ -448,7 +448,9 @@ _faucet_health: dict[
 _GITHUB_AIRDROP_SEARCH_URL = "https://api.github.com/search/issues"
 
 
-async def discover_airdrops(max_results: int = 10) -> list[AirdropOpportunity]:
+async def discover_airdrops(max_results: int | None = None) -> list[AirdropOpportunity]:
+    if max_results is None:
+        max_results = settings.MAX_AIRDROP_RESULTS
     """
     Scan GitHub Issues for airdrop / testnet / faucet opportunities.
     Returns a list of AirdropOpportunity with heuristic scores.
@@ -467,7 +469,9 @@ async def discover_airdrops(max_results: int = 10) -> list[AirdropOpportunity]:
         headers["Authorization"] = f"Bearer {settings.GITHUB_TOKEN}"
 
     async with httpx.AsyncClient(
-        timeout=15.0, headers=settings.http_headers(), proxy=settings.proxy_config()
+        timeout=settings.HTTP_TIMEOUT,
+        headers=settings.http_headers(),
+        proxy=settings.proxy_config(),
     ) as client:
         for query in queries:
             try:
@@ -555,23 +559,23 @@ def _score_airdrop(title: str, body: str, labels: list[str]) -> float:
     0.0 = low value, 1.0 = high value.
     """
     text = (title + " " + body).lower()
-    score = 0.3  # baseline
+    score = settings.AIRDROP_BASELINE_SCORE
 
     # Positive signals
     if any(w in text for w in ["token", "airdrop", "reward", "incentiv"]):
-        score += 0.2
+        score += settings.AIRDROP_POSITIVE_SIGNAL
     if any(w in text for w in ["testnet", "launch", "mainnet", "tge"]):
-        score += 0.15
+        score += settings.AIRDROP_POSITIVE_SIGNAL * 0.75
     if any(label in labels for label in ["airdrop", "reward", "incentivized"]):
-        score += 0.15
+        score += settings.AIRDROP_POSITIVE_SIGNAL * 0.75
     if "$" in text or any(c in text for c in ["usd", "eth", "btc"]):
-        score += 0.1
+        score += settings.AIRDROP_POSITIVE_SIGNAL * 0.5
 
     # Negative signals
     if any(w in text for w in ["scam", "suspicious", "untested"]):
-        score -= 0.3
+        score -= settings.AIRDROP_NEGATIVE_SIGNAL
     if "whitelist" in text and "registration" not in text:
-        score -= 0.1  # speculative, may be invite-only
+        score -= settings.AIRDROP_NEGATIVE_SIGNAL / 3  # speculative, may be invite-only
 
     return max(0.0, min(1.0, score))
 
@@ -637,8 +641,8 @@ async def claim_faucet(
             "message": f"Cooldown active ({remaining_h}h remaining)",
         }
 
-    # Budget check (faucet claims cost ~$0 gas, but we track for safety)
-    if not can_spend(db, 0.001):
+    # Budget check (faucet claims cost minimal gas, but we track for safety)
+    if not can_spend(db, settings.COST_FAUCET_CLAIM):
         return {"success": False, "amount": 0, "message": "Budget cap reached"}
 
     logger.info(
@@ -651,7 +655,7 @@ async def claim_faucet(
     try:
         payload = {faucet.wallet_field: wallet_address, **faucet.claim_params}
         async with httpx.AsyncClient(
-            timeout=20.0,
+            timeout=settings.HTTP_TIMEOUT,
             headers=settings.http_headers(),
             proxy=settings.proxy_config(),
         ) as client:
@@ -680,7 +684,9 @@ async def claim_faucet(
             # Reset health — faucet works
             _faucet_health[faucet.name] = {"consecutive_failures": 0, "disabled": False}
             _recent_claims[cooldown_key] = time.time()
-            record_spend(db, 0.001, "gas", f"faucet_claim:{faucet.name}")
+            record_spend(
+                db, settings.COST_FAUCET_CLAIM, "gas", f"faucet_claim:{faucet.name}"
+            )
 
             # Log transaction
             tx = Transaction(
@@ -734,8 +740,11 @@ async def claim_faucet(
 
 async def claim_all_faucets(
     db: Session,
-    wallets_per_chain: int = 3,
+    wallets_per_chain: int | None = None,
 ) -> dict[str, list[dict]]:
+    if wallets_per_chain is None:
+        wallets_per_chain = settings.WALLETS_PER_CHAIN
+
     """
     Iterate over all known faucets and claim using disposable wallets.
     For non-IP-gated faucets, tries multiple wallets in sequence.
@@ -790,10 +799,14 @@ async def claim_all_faucets(
 
 async def batch_create_wallets(
     db: Session,
-    count: int = 5,
+    count: int | None = None,
     chains: list[str] | None = None,
-    start_index: int = 10,  # start at index 10 to avoid hot wallets
+    start_index: int | None = None,
 ) -> list[Wallet]:
+    if count is None:
+        count = settings.BATCH_WALLET_COUNT
+    if start_index is None:
+        start_index = settings.BATCH_WALLET_START_INDEX
     """
     Derive and persist multiple disposable wallets for airdrop farming.
 
@@ -864,7 +877,7 @@ async def _register_on_github(
             # Star the repo (common airdrop task requirement)
             if repo:
                 async with httpx.AsyncClient(
-                    timeout=15.0,
+                    timeout=settings.HTTP_TIMEOUT,
                     headers=settings.http_headers(),
                     proxy=settings.proxy_config(),
                 ) as client:
@@ -923,7 +936,7 @@ async def _register_on_dework(
             # Dework API: Submit a task application
             if task_id:
                 async with httpx.AsyncClient(
-                    timeout=15.0,
+                    timeout=settings.HTTP_TIMEOUT,
                     headers=settings.http_headers(),
                     proxy=settings.proxy_config(),
                 ) as client:
@@ -978,7 +991,7 @@ async def _register_on_galxe(
         try:
             # Galxe API: Submit wallet for credential
             async with httpx.AsyncClient(
-                timeout=15.0,
+                timeout=settings.HTTP_TIMEOUT,
                 headers=settings.http_headers(),
                 proxy=settings.proxy_config(),
             ) as client:

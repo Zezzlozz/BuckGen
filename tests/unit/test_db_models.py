@@ -7,9 +7,8 @@ Tests cover:
   - Enum values for BountyPlatform, BountyStatus, WalletType
 """
 
-import gc
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
 from app.db.models import (

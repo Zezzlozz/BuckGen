@@ -4,9 +4,9 @@ Run:  python tests\test_airdrop.py
 """
 
 import asyncio
+import gc
 import os
 import sys
-import gc
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,9 +23,10 @@ if test_db.exists():
 
 
 async def main():
-    from app.db.models import Base, Wallet, WalletType
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+
+    from app.db.models import Base, Wallet, WalletType
 
     engine = create_engine("sqlite:///./test_airdrop.db")
     Base.metadata.create_all(engine)
@@ -65,7 +66,6 @@ async def main():
     # --- Test 2: Batch wallet creation ---
     try:
         from app.modules.airdrop import batch_create_wallets
-        from app.modules.wallet import derive_and_sync_batch
 
         wallets = await batch_create_wallets(db, count=3, chains=["ethereum", "base"])
         check(f"Batch wallet creation ({len(wallets)} wallets)", len(wallets) >= 6)
@@ -80,7 +80,7 @@ async def main():
 
     # --- Test 3: Faucet claiming (will likely fail due to captcha/IP reqs) ---
     try:
-        from app.modules.airdrop import claim_faucet, FAUCET_REGISTRY
+        from app.modules.airdrop import FAUCET_REGISTRY, claim_faucet
 
         if FAUCET_REGISTRY:
             faucet = FAUCET_REGISTRY[0]

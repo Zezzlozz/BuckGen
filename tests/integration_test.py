@@ -1,12 +1,12 @@
-"""
+r"""
 Full integration test.
 Run:  python tests\integration_test.py
 """
 
 import asyncio
-import sys
-import os
 import gc
+import os
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -22,7 +22,6 @@ if test_db.exists():
 
 
 async def run_tests():
-    import time
 
     passed = 0
     failed = 0
@@ -54,16 +53,17 @@ async def run_tests():
 
     # --- 2. DB init ---
     try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
         from app.db.models import (
             Base,
             Bounty,
+            BountyPlatform,
+            BountyStatus,
             Wallet,
             WalletType,
-            BountyStatus,
-            BountyPlatform,
         )
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
 
         engine = create_engine("sqlite:///./test_integration.db")
         Base.metadata.create_all(engine)
@@ -101,7 +101,7 @@ async def run_tests():
         check("Private key accessible in memory", True)
 
         # Keyring zeroing
-        from app.modules.wallet import zero_keyring, get_all_wallets
+        from app.modules.wallet import get_all_wallets, zero_keyring
 
         assert len(get_all_wallets()) >= 2
         zero_keyring()
@@ -115,7 +115,7 @@ async def run_tests():
 
     # --- 4. RPC connectivity ---
     try:
-        from app.modules.rpc import check_all_chains, get_balance, estimate_gas
+        from app.modules.rpc import check_all_chains, estimate_gas, get_balance
 
         statuses = check_all_chains()
         connected = sum(1 for s in statuses.values() if s.connected)
@@ -149,8 +149,8 @@ async def run_tests():
 
     # --- 5. Bounty scan ---
     try:
-        from app.modules.gitcoin import fetch_open_bounties, normalize_bounty
         from app.llm.scorer import score_bounty
+        from app.modules.gitcoin import fetch_open_bounties, normalize_bounty
 
         bounties = await fetch_open_bounties(max_bounties=5)
         assert len(bounties) > 0, "No bounties returned"
@@ -197,7 +197,7 @@ async def run_tests():
 
     # --- 6. Budget ---
     try:
-        from app.utils.budget import within_daily_cap, within_stop_loss, can_spend
+        from app.utils.budget import can_spend, within_daily_cap, within_stop_loss
 
         assert within_daily_cap(db)
         assert within_stop_loss(db)
@@ -217,7 +217,7 @@ async def run_tests():
 
     # --- 8. Exchange tickers ---
     try:
-        from app.modules.prices import fetch_all_tickers, DEFAULT_TRADING_PAIRS
+        from app.modules.prices import fetch_all_tickers
 
         tickers = fetch_all_tickers()
         total = sum(len(ts) for ts in tickers.values())
@@ -250,8 +250,8 @@ async def run_tests():
     # --- 10. Arbitrage scan ---
     try:
         from app.modules.prices import (
-            fetch_all_tickers,
             fetch_all_coingecko,
+            fetch_all_tickers,
             find_arbitrage_opportunities,
         )
 
@@ -293,7 +293,7 @@ async def run_tests():
 
     # --- 12. Airdrop discovery ---
     try:
-        from app.modules.airdrop import discover_airdrops, batch_create_wallets
+        from app.modules.airdrop import batch_create_wallets, discover_airdrops
 
         opps = await discover_airdrops(max_results=5)
         check(f"Airdrop discovery ({len(opps)} found)", len(opps) > 0)

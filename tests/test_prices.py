@@ -4,7 +4,6 @@ Run:  python tests\test_prices.py
 """
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -26,7 +25,7 @@ async def main():
 
     # --- Test 1: Exchange tickers ---
     try:
-        from app.modules.prices import fetch_all_tickers, DEFAULT_TRADING_PAIRS
+        from app.modules.prices import DEFAULT_TRADING_PAIRS, fetch_all_tickers
 
         tickers = fetch_all_tickers()
         total = sum(len(ts) for ts in tickers.values())
@@ -63,8 +62,8 @@ async def main():
     # --- Test 3: Arbitrage detection ---
     try:
         from app.modules.prices import (
-            fetch_all_tickers,
             fetch_all_coingecko,
+            fetch_all_tickers,
             find_arbitrage_opportunities,
         )
 
@@ -98,7 +97,7 @@ async def main():
         from app.modules.prices import check_all_prices
 
         result = await check_all_prices(capital_eur=100.0)
-        check(f"Full price check ran", isinstance(result, dict))
+        check("Full price check ran", isinstance(result, dict))
         check(f"  Pairs: {result['pairs_checked']}", result["pairs_checked"] > 0)
         check(
             f"  Exchanges: {result['exchanges_checked']}",

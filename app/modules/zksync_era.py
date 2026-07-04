@@ -18,8 +18,8 @@ import logging
 from sqlalchemy.orm import Session
 from web3 import Web3
 
+from app.config import settings
 from app.db.models import Transaction
-from app.modules.rpc import get_web3
 from app.modules.wallet import (
     derive_wallet,
 )
@@ -165,7 +165,7 @@ async def send_self_transfer(
     symbol = config.get("symbol", "ETH")
 
     # Check budget
-    if not can_spend(db, 0.001):
+    if not can_spend(db, settings.COST_TESTNET_TRANSFER):
         return {"success": False, "error": "Budget cap reached"}
 
     # Get two agent wallets
@@ -211,7 +211,9 @@ async def send_self_transfer(
             memo=f"Self-transfer on {chain} (airdrop farming)",
         )
         db.add(tx_record)
-        record_spend(db, 0.0005, "gas", f"self-transfer {chain}")
+        record_spend(
+            db, settings.COST_TESTNET_TRANSFER, "gas", f"self-transfer {chain}"
+        )
         db.commit()
 
         logger.info("[ontask] Self-transfer on %s: tx=%s", chain, tx_hash_hex[:20])
@@ -253,7 +255,7 @@ async def deploy_test_contract(
 
     config = TESTNET_CONFIG.get(chain, {})
 
-    if not can_spend(db, 0.002):
+    if not can_spend(db, settings.COST_TESTNET_DEPLOY):
         return {"success": False, "error": "Budget cap reached"}
 
     try:
@@ -292,7 +294,7 @@ async def deploy_test_contract(
             memo=f"Counter contract deploy on {chain}",
         )
         db.add(tx_record)
-        record_spend(db, 0.001, "gas", f"deploy {chain}")
+        record_spend(db, settings.COST_TESTNET_DEPLOY, "gas", f"deploy {chain}")
         db.commit()
 
         logger.info("[ontask] Contract deployed on %s: tx=%s", chain, tx_hash_hex[:20])
@@ -346,10 +348,9 @@ UNISWAP_V2_ROUTER_ABI = [
 ]
 
 # Uniswap V2 router addresses on testnets
+# Add real addresses as needed — placeholder addresses removed to prevent silent failures
 TESTNET_ROUTERS: dict[str, str] = {
     "sepolia": "0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008",  # Uniswap V2 on Sepolia
-    "base-sepolia": "0x500e4f2E6A9b7F8F3F5C8E5B5A9b0f1E2d3c4b5",  # placeholder
-    "arbitrum-sepolia": "0x500e4f2E6A9b7F8F3F5C8E5B5A9b0f1E2d3c4b5",  # placeholder
 }
 
 
@@ -371,7 +372,7 @@ async def mint_test_nft(
     Returns:
         Result dict with tx_hash or error.
     """
-    w3 = get_web3(chain)
+    w3 = _get_testnet_w3(chain)
     if not w3:
         return {"success": False, "error": f"No RPC for {chain}"}
 
@@ -414,7 +415,7 @@ async def mint_test_nft(
             memo=f"NFT mint on {chain}",
         )
         db.add(tx_record)
-        record_spend(db, 0.001, "gas", f"nft_mint {chain}")
+        record_spend(db, settings.COST_TESTNET_NFT, "gas", f"nft_mint {chain}")
         db.commit()
 
         logger.info("[ontask] NFT deployed on %s: tx=%s", chain, tx_hash_hex[:20])

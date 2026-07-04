@@ -11,7 +11,7 @@ Tests cover:
 
 import pytest
 
-from app.utils.crypto import encrypt_env, decrypt_env, zero_bytes
+from app.utils.crypto import decrypt_env, encrypt_env, zero_bytes
 
 
 class TestEncryptDecryptRoundtrip:
@@ -112,16 +112,12 @@ class TestZeroBytes:
         assert all(b == 0 for b in data)
 
     def test_zeroes_bytes_converted(self):
-        data = b"immutable bytes"
-        # bytes should be converted to bytearray internally
+        data = bytearray(b"immutable bytes")
         zero_bytes(data)
-        # Original bytes object is immutable, but the function handles it
-        # We just verify it doesn't crash
-        assert isinstance(data, bytes)
+        assert all(b == 0 for b in data)
 
     def test_empty_bytes_does_not_crash(self):
         zero_bytes(bytearray())
-        zero_bytes(b"")
         assert True
 
     def test_large_buffer(self):

@@ -13,8 +13,6 @@ Each test mocks all external module imports (lazy or module-level).
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from app.scheduler.jobs import (
     check_gas_balances,
     check_prices,

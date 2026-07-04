@@ -10,11 +10,7 @@ Tests cover:
 """
 
 import asyncio
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import httpx
-import pytest
 
 from app.db.models import Bounty, BountyPlatform, BountyStatus
 from app.modules.submit_bounty import (

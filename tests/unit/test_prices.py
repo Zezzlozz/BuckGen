@@ -9,20 +9,16 @@ Tests cover:
   - Fee calculations and confidence scoring
 """
 
-import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from app.modules.prices import (
-    _normalize_symbol,
-    fetch_ticker,
-    fetch_all_tickers,
-    find_arbitrage_opportunities,
-    TickerPrice,
-    ArbitrageOpportunity,
-    EXCHANGE_FEES,
     MIN_PROFIT_THRESHOLD_PCT,
+    TickerPrice,
+    _normalize_symbol,
+    fetch_all_tickers,
+    fetch_ticker,
+    find_arbitrage_opportunities,
 )
-
 
 # =============================================================================
 # Symbol normalization

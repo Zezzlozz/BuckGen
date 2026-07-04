@@ -115,7 +115,7 @@ async def _github_request(
     for attempt in range(1 + retries):
         try:
             async with httpx.AsyncClient(
-                timeout=30.0,
+                timeout=settings.HTTP_TIMEOUT,
                 headers=settings.http_headers(),
                 proxy=settings.proxy_config(),
             ) as client:
@@ -196,8 +196,8 @@ async def submit_bounty(
             "error": f"Bounty status is {bounty.status.value}, not OPEN",
         }
 
-    # Budget check (each submission costs ~$0.01 in LLM compute)
-    if not can_spend(db, 0.01):
+    # Budget check (each submission costs LLM compute)
+    if not can_spend(db, settings.COST_LLM_SUBMIT):
         return {"success": False, "error": "Budget cap reached"}
 
     logger.info("Submitting bounty #%d: %s", bounty.id, bounty.title[:60])
@@ -263,7 +263,9 @@ async def submit_bounty(
     if posted:
         bounty.status = BountyStatus.APPLIED
         bounty.updated_at = datetime.now(UTC)
-        record_spend(db, 0.01, "llm", f"bounty submission #{bounty.id}")
+        record_spend(
+            db, settings.COST_LLM_SUBMIT, "llm", f"bounty submission #{bounty.id}"
+        )
         db.commit()
 
         notify_msg = (
@@ -290,9 +292,14 @@ async def submit_bounty(
 
 async def submit_top_bounties(
     db: Session,
-    max_submissions: int = 3,
-    min_score: float = 0.7,
+    max_submissions: int | None = None,
+    min_score: float | None = None,
 ) -> list[dict]:
+    if max_submissions is None:
+        max_submissions = settings.MAX_BOUNTY_SUBMISSIONS
+    if min_score is None:
+        min_score = settings.MIN_BOUNTY_SUBMIT_SCORE
+
     """
     Find the highest-scoring OPEN bounties and submit solutions.
 

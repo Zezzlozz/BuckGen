@@ -117,7 +117,11 @@ def get_web3(chain: str) -> Web3 | None:
 
     for url in urls:
         try:
-            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 10}))
+            w3 = Web3(
+                Web3.HTTPProvider(
+                    url, request_kwargs={"timeout": settings.HTTP_TIMEOUT}
+                )
+            )
             if w3.is_connected():
                 _w3_cache[chain] = w3
                 if url != primary:
@@ -179,7 +183,7 @@ def check_all_chains() -> dict[str, ChainStatus]:
 # ---------------------------------------------------------------------------
 # Balance queries
 # ---------------------------------------------------------------------------
-_MIN_GAS_THRESHOLD = 0.0005  # ETH (or equivalent) — enough for ~1-2 txs
+_MIN_GAS_THRESHOLD = settings.GAS_THRESHOLD_ETH  # ETH (or equivalent)
 
 
 def get_balance(address: str, chain: str = "ethereum") -> WalletBalance:
@@ -285,7 +289,11 @@ def estimate_gas(
     try:
         gas_price_wei = w3.eth.gas_price
         gas_price_gwei = float(w3.from_wei(gas_price_wei, "gwei"))
-        gas_limit = 21000 if tx_type == "transfer" else 100000
+        gas_limit = (
+            settings.GAS_LIMIT_TRANSFER
+            if tx_type == "transfer"
+            else settings.GAS_LIMIT_TX
+        )
         cost_wei = gas_price_wei * gas_limit
         cost_eth = float(w3.from_wei(cost_wei, "ether"))
 

@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.modules.wallet import derive_wallet, CHAIN_CONFIGS
-from app.modules.rpc import check_all_chains, get_balance, estimate_gas
+from app.modules.rpc import check_all_chains, estimate_gas, get_balance
+from app.modules.wallet import derive_wallet
 
 
 def test_wallet_derivation():
@@ -39,7 +39,7 @@ def test_wallet_derivation():
 
     print(f"  PASS: Wallet derivation (Hardhat #0: {acct0.address})")
     print(f"  PASS: Wallet derivation (Hardhat #1: {acct1.address})")
-    print(f"  PASS: Deterministic caching works")
+    print("  PASS: Deterministic caching works")
 
 
 def test_rpc_connectivity():

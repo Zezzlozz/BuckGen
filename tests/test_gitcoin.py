@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 async def main():
-    from app.modules.gitcoin import fetch_open_bounties, normalize_bounty
     from app.llm.scorer import score_bounty
+    from app.modules.gitcoin import fetch_open_bounties, normalize_bounty
 
     print("Fetching bounty-labelled GitHub issues...")
     bounties = await fetch_open_bounties(max_bounties=5)

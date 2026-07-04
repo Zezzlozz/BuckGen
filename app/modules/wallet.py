@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.models import Wallet, WalletType
-from app.utils.crypto import zero_bytes
 
 logger = logging.getLogger("buckgen.wallet")
 

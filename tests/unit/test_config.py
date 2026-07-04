@@ -8,10 +8,7 @@ Tests cover:
   - Decryption of encrypted seed phrase
 """
 
-import os
 from unittest.mock import patch
-
-import pytest
 
 # Note: the global `settings` singleton is created at import time in app/config.py
 # with env vars set by conftest.py.  Here we test the Settings class directly by

@@ -11,8 +11,8 @@ Tests cover:
 """
 
 import asyncio
-import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import httpx
 
 
@@ -86,7 +86,7 @@ class TestFetchOpenBounties:
         return inst
 
     def test_fetches_single_page(self):
-        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
+        from app.modules.gitcoin import SEARCH_QUERIES, fetch_open_bounties
 
         with (
             patch("app.config.settings") as mock_settings,
@@ -110,7 +110,7 @@ class TestFetchOpenBounties:
 
     def test_deduplicates_across_queries(self):
         """Same issue returned by multiple label queries should appear once."""
-        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
+        from app.modules.gitcoin import SEARCH_QUERIES, fetch_open_bounties
 
         issue = _make_github_issue(1, "Test Bounty")
         with (
@@ -127,7 +127,7 @@ class TestFetchOpenBounties:
             assert len(result) == 1  # deduplicated
 
     def test_paginates_across_pages(self):
-        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
+        from app.modules.gitcoin import SEARCH_QUERIES, fetch_open_bounties
 
         with (
             patch("app.config.settings") as mock_settings,
@@ -154,7 +154,7 @@ class TestFetchOpenBounties:
             assert len(result) == 4
 
     def test_rate_limited_returns_empty(self):
-        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
+        from app.modules.gitcoin import SEARCH_QUERIES, fetch_open_bounties
 
         with (
             patch("app.config.settings") as mock_settings,
@@ -172,7 +172,7 @@ class TestFetchOpenBounties:
 
     def test_partial_query_failure(self):
         """If one query fails, others still return results."""
-        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
+        from app.modules.gitcoin import SEARCH_QUERIES, fetch_open_bounties
 
         with (
             patch("app.config.settings") as mock_settings,
@@ -199,7 +199,7 @@ class TestFetchOpenBounties:
             assert len(result) >= 1  # at least the one from successful queries
 
     def test_network_error_returns_empty(self):
-        from app.modules.gitcoin import fetch_open_bounties, SEARCH_QUERIES
+        from app.modules.gitcoin import SEARCH_QUERIES, fetch_open_bounties
 
         with (
             patch("app.config.settings") as mock_settings,

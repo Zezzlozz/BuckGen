@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+from app.config import settings
 from app.llm.client import call_llm
 
 logger = logging.getLogger("buckgen.llm")
@@ -100,7 +101,7 @@ async def _score_with_llm(bounty: dict[str, Any]) -> float | None:
     """Score a bounty via OpenCode Zen → Ollama → heuristic."""
     try:
         prompt = _build_prompt(bounty)
-        text = await call_llm("score", prompt, max_tokens=128, temperature=0.1)
+        text = await call_llm("score", prompt, max_tokens=settings.LLM_SCORE_MAX_TOKENS)
         if text is None:
             return None
 
@@ -183,7 +184,7 @@ def _parse_llm_score(text: str) -> float | None:
 # ---------------------------------------------------------------------------
 def _score_heuristic(bounty: dict[str, Any]) -> float:
     """Score a bounty without an LLM, using keyword + metadata weights."""
-    score = 0.5  # neutral baseline
+    score = settings.HEURISTIC_BASELINE_SCORE
 
     # Experience level
     level = bounty.get("experience_level", "").lower()
@@ -200,19 +201,19 @@ def _score_heuristic(bounty: dict[str, Any]) -> float:
     # Keywords in title/description
     title_desc = (bounty.get("title", "") + " " + bounty.get("description", "")).lower()
     keyword_hits = sum(1 for kw in DESIRABLE_KEYWORDS if kw in title_desc)
-    score += min(keyword_hits / 5, 1.0) * 0.15
+    score += min(keyword_hits / 5, 1.0) * settings.KEYWORD_BONUS_WEIGHT
 
     # Keywords from metadata
     keywords = bounty.get("keywords", []) or []
     issue_kw = bounty.get("issue_keywords", []) or []
     meta_hits = len(keywords) + len(issue_kw)
-    score += min(meta_hits / 3, 1.0) * 0.1
+    score += min(meta_hits / 3, 1.0) * settings.META_BONUS_WEIGHT
 
     # Reward bonus
     reward = bounty.get("reward_amount", 0)
     if reward > 100:
-        score += 0.1
+        score += settings.LARGE_REWARD_BONUS
     elif reward > 10:
-        score += 0.05
+        score += settings.SMALL_REWARD_BONUS
 
     return max(0.0, min(1.0, score))

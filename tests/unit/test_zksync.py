@@ -9,19 +9,16 @@ Tests cover:
   - run_all_testnets: runs across all chains, sends summary alert
 """
 
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.modules.zksync_era import (
+    TESTNET_CONFIG,
+    deploy_test_contract,
+    mint_test_nft,
     run_all_testnets,
     run_testnet_actions,
     send_self_transfer,
-    deploy_test_contract,
-    mint_test_nft,
-    TESTNET_CONFIG,
 )
-
 
 # =============================================================================
 # Helpers
@@ -261,7 +258,7 @@ class TestMintTestNft:
         account = _make_account()
 
         with (
-            patch("app.modules.zksync_era.get_web3", return_value=w3),
+            patch("app.modules.zksync_era._get_testnet_w3", return_value=w3),
             patch("app.modules.zksync_era.derive_wallet", return_value=account),
             patch("app.modules.zksync_era.record_spend"),
         ):
@@ -272,7 +269,7 @@ class TestMintTestNft:
         assert "tx_hash" in result
 
     def test_no_rpc_connection(self, db_session):
-        with patch("app.modules.zksync_era.get_web3", return_value=None):
+        with patch("app.modules.zksync_era._get_testnet_w3", return_value=None):
             result = run_async(mint_test_nft(db_session))
         assert result["success"] is False
         assert "No RPC" in result["error"]
@@ -283,7 +280,7 @@ class TestMintTestNft:
         w3.eth.send_raw_transaction.side_effect = RuntimeError("mint failed")
 
         with (
-            patch("app.modules.zksync_era.get_web3", return_value=w3),
+            patch("app.modules.zksync_era._get_testnet_w3", return_value=w3),
             patch("app.modules.zksync_era.derive_wallet", return_value=account),
         ):
             result = run_async(mint_test_nft(db_session))
@@ -313,7 +310,7 @@ class TestRunTestnetActions:
 
         with (
             patch("app.modules.zksync_era.Web3", return_value=w3),
-            patch("app.modules.zksync_era.get_web3", return_value=w3),
+            patch("app.modules.zksync_era._get_testnet_w3", return_value=w3),
             patch("app.modules.zksync_era.derive_wallet") as mock_derive,
             patch("app.modules.zksync_era.can_spend", return_value=True),
             patch("app.modules.zksync_era.record_spend"),
@@ -336,7 +333,7 @@ class TestRunTestnetActions:
 
         with (
             patch("app.modules.zksync_era.Web3", return_value=w3),
-            patch("app.modules.zksync_era.get_web3", return_value=w3),
+            patch("app.modules.zksync_era._get_testnet_w3", return_value=w3),
             patch("app.modules.zksync_era.derive_wallet", return_value=account),
             patch("app.modules.zksync_era.can_spend") as mock_can_spend,
             patch("app.modules.zksync_era.record_spend"),
@@ -365,7 +362,7 @@ class TestRunAllTestnets:
 
         with (
             patch("app.modules.zksync_era.Web3", return_value=w3),
-            patch("app.modules.zksync_era.get_web3", return_value=w3),
+            patch("app.modules.zksync_era._get_testnet_w3", return_value=w3),
             patch("app.modules.zksync_era.derive_wallet", return_value=account),
             patch("app.modules.zksync_era.can_spend", return_value=True),
             patch("app.modules.zksync_era.record_spend"),
@@ -388,7 +385,7 @@ class TestRunAllTestnets:
 
         with (
             patch("app.modules.zksync_era.Web3", return_value=w3),
-            patch("app.modules.zksync_era.get_web3", return_value=w3),
+            patch("app.modules.zksync_era._get_testnet_w3", return_value=w3),
             patch("app.modules.zksync_era.derive_wallet", return_value=account),
             patch("app.modules.zksync_era.can_spend", return_value=True),
             patch("app.modules.zksync_era.record_spend"),

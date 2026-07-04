@@ -5,20 +5,16 @@ Covers all 27 endpoints via TestClient with fully mocked dependencies.
 Follows the project convention: class-organized tests using unittest.mock.
 """
 
-import asyncio
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-from starlette.testclient import TestClient
-
 # ---------------------------------------------------------------------------
 # Lifespan override — prevents init_db, wallet seeding, and scheduler startup
 # from running when TestClient enters the context manager.
 # ---------------------------------------------------------------------------
-
 from contextlib import asynccontextmanager as _actx
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from starlette.testclient import TestClient
 
 
 @_actx
@@ -26,9 +22,11 @@ async def _noop_lifespan(_app):
     yield
 
 
+from app.config import settings
 from app.main import app
 
 app.router.lifespan_context = _noop_lifespan
+settings.DEBUG = True
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +106,7 @@ class TestWallets:
         wallet.derivation_path = "m/44'/60'/0'/0/0"
         wallet.balance_wei = "1000000"
         wallet.is_active = True
-        wallet.last_used_at = datetime.now(timezone.utc)
+        wallet.last_used_at = datetime.now(UTC)
         db.query.return_value.filter.return_value.all.return_value = [wallet]
         with patch("app.main.get_session", return_value=gen):
             resp = client.get("/wallets")
@@ -501,13 +499,11 @@ class TestBounties:
     def test_submit_success(self, client):
         db, gen = _mock_db()
         with patch("app.main.get_session", return_value=gen):
-            with patch(
-                "app.modules.submit_bounty.submit_bounty",
-                AsyncMock(return_value={"success": True, "bounty_id": 1}),
-            ):
-                resp = client.post("/bounties/submit/1")
+            resp = client.post("/bounties/submit/1")
         assert resp.status_code == 200
-        assert resp.json()["success"] is True
+        data = resp.json()
+        assert data["success"] is False
+        assert "auto-submit disabled" in data["error"]
 
     def test_submit_not_found(self, client):
         db, gen = _mock_db()
@@ -522,26 +518,28 @@ class TestBounties:
 
     def test_submit_top(self, client):
         db, gen = _mock_db()
-        results = [{"bounty_id": 1, "success": True}]
+        results = [{"bounty_id": 1, "title": "Fix bug"}]
         with patch("app.main.get_session", return_value=gen):
             with patch(
-                "app.modules.submit_bounty.submit_top_bounties",
+                "app.modules.bounty_review.research_unassessed",
                 AsyncMock(return_value=results),
             ):
                 resp = client.post("/bounties/submit-top?max_subs=3&min_score=0.7")
         assert resp.status_code == 200
-        assert resp.json()["submissions"] == 1
+        data = resp.json()
+        assert data["researched"] == 1
 
     def test_submit_top_empty(self, client):
         db, gen = _mock_db()
         with patch("app.main.get_session", return_value=gen):
             with patch(
-                "app.modules.submit_bounty.submit_top_bounties",
+                "app.modules.bounty_review.research_unassessed",
                 AsyncMock(return_value=[]),
             ):
                 resp = client.post("/bounties/submit-top")
         assert resp.status_code == 200
-        assert resp.json()["submissions"] == 0
+        data = resp.json()
+        assert data["researched"] == 0
 
 
 # =============================================================================

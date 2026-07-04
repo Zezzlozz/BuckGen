@@ -38,13 +38,9 @@ logger = logging.getLogger("buckgen.prices")
 # =============================================================================
 
 # Margin for profitable arbitrage (after all fees)
-# Actual taker fees per exchange (not max):
-#   Binance: 0.1%, Coinbase: 0.4-0.6%, Kraken: 0.16%, Bybit: 0.1%
-#   KuCoin: 0.1%, OKX: 0.08%, Gate.io: 0.15%, MEXC: 0.0%
 # CEX-CEX arb must account for withdrawal fees, transfer time, and slippage.
-# Realistic minimum for profitable trade with <$10k capital is ~0.8-1.5%.
-# We use 0.8% to filter out noise while catching genuine opportunities.
-MIN_PROFIT_THRESHOLD_PCT = 0.8
+# Configurable via MIN_PROFIT_THRESHOLD_PCT env var (default 0.8%).
+MIN_PROFIT_THRESHOLD_PCT = settings.MIN_PROFIT_THRESHOLD_PCT
 
 # Extensive trading pair coverage (top 100+ pairs by volume)
 DEFAULT_TRADING_PAIRS = sorted(
@@ -144,9 +140,10 @@ DEFAULT_TRADING_PAIRS = sorted(
 # Extended pairs for wider coverage (same as default now since default is already 100+)
 EXTENDED_PAIRS = DEFAULT_TRADING_PAIRS
 
-# Exchange fee estimates (taker fee as decimal, e.g. 0.001 = 0.1%)
-# Actual rates for standard non-VIP accounts
-EXCHANGE_FEES: dict[str, float] = {
+# Static fallback exchange fees (taker fee as decimal, e.g. 0.001 = 0.1%).
+# These are refreshed from ccxt live once per hour; the static values are
+# the fallback when live fetch fails or is not yet cached.
+_EXCHANGE_FEES_STATIC: dict[str, float] = {
     "binance": 0.001,  # 0.1% (BNB discount: 0.075%)
     "coinbase": 0.006,  # 0.6% (standard taker)
     "kraken": 0.0026,  # 0.16% standard + 0.1% spread
@@ -156,6 +153,57 @@ EXCHANGE_FEES: dict[str, float] = {
     "gate": 0.0015,  # 0.15%
     "mexc": 0.000,  # 0% (maker, taker varies but very low)
 }
+
+# Live fee cache — refreshed every _FEE_CACHE_TTL seconds
+_FEE_CACHE: dict[str, float] = {}
+_FEE_CACHE_TIME: float = 0.0
+_FEE_CACHE_TTL: int = 3600  # 1 hour
+
+
+def get_exchange_fee(name: str) -> float:
+    """Return taker fee for an exchange, trying live ccxt data first.
+
+    Live data is cached for 1 hour to avoid rate-limit issues.
+    Falls back to static defaults, then to ``settings.EXCHANGE_FEES_FALLBACK``.
+    """
+    global _FEE_CACHE, _FEE_CACHE_TIME
+
+    now = time.time()
+    if not _FEE_CACHE or (now - _FEE_CACHE_TIME) > _FEE_CACHE_TTL:
+        try:
+            # Try to fetch live fees from ccxt markets
+            live: dict[str, float] = {}
+            exchange_names = [
+                "binance",
+                "coinbase",
+                "kraken",
+                "bybit",
+                "kucoin",
+                "okx",
+                "gate",
+                "mexc",
+            ]
+            for ex_name in exchange_names:
+                try:
+                    exchange_class = getattr(ccxt, ex_name, None)
+                    if exchange_class is None:
+                        continue
+                    exchange = exchange_class()
+                    market = exchange.market("ETH/USDT")
+                    live[ex_name] = market["taker"]
+                except Exception:
+                    continue
+
+            if live:
+                _FEE_CACHE = live
+                _FEE_CACHE_TIME = now
+        except Exception:
+            pass
+
+    if name in _FEE_CACHE:
+        return _FEE_CACHE[name]
+    return _EXCHANGE_FEES_STATIC.get(name, settings.EXCHANGE_FEES_FALLBACK)
+
 
 # CoinGecko API (free tier, 10-30 calls/min)
 COINGECKO_API = "https://api.coingecko.com/api/v3"
@@ -328,7 +376,7 @@ def _get_exchange(name: str) -> ccxt.Exchange | None:
 
         config = {
             "enableRateLimit": True,
-            "timeout": 10000,
+            "timeout": int(settings.HTTP_TIMEOUT * 1000),
             "headers": settings.http_headers(),
         }
 
@@ -502,7 +550,7 @@ async def _load_coingecko_ids() -> dict[str, str]:
 
     try:
         async with httpx.AsyncClient(
-            timeout=15.0,
+            timeout=settings.HTTP_TIMEOUT,
             headers=settings.http_headers(),
             proxy=settings.proxy_config(),
         ) as client:
@@ -545,7 +593,7 @@ async def fetch_coingecko_price(
 
     try:
         async with httpx.AsyncClient(
-            timeout=10.0,
+            timeout=settings.HTTP_TIMEOUT,
             headers=settings.http_headers(),
             proxy=settings.proxy_config(),
         ) as client:
@@ -621,7 +669,7 @@ async def fetch_all_coingecko(
     result: dict[str, CoinGeckoPrice] = {}
     try:
         async with httpx.AsyncClient(
-            timeout=15.0,
+            timeout=settings.HTTP_TIMEOUT,
             headers=settings.http_headers(),
             proxy=settings.proxy_config(),
         ) as client:
@@ -728,8 +776,8 @@ def find_arbitrage_opportunities(
                         continue
 
                     # Calculate fees (per-exchange taker rates)
-                    fee_buy = EXCHANGE_FEES.get(buy.exchange, 0.002)
-                    fee_sell = EXCHANGE_FEES.get(sell.exchange, 0.002)
+                    fee_buy = get_exchange_fee(buy.exchange)
+                    fee_sell = get_exchange_fee(sell.exchange)
                     total_fee_pct = (fee_buy + fee_sell) * 100.0
 
                     net_profit_pct = gap_pct - total_fee_pct

@@ -7,13 +7,12 @@ Sets up:
   - Preserved environment variables (SEED_PHRASE, etc.).
 """
 
-import os
 import gc
-from pathlib import Path
+import os
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 
 # Ensure SEED_PHRASE is set before any imports that read settings
 os.environ.setdefault(

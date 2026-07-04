@@ -9,17 +9,16 @@ Tests cover:
   - Full P&L summary across all modules
 """
 
-import pytest
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
+from app.db.models import BudgetEntry, RevenueEntry
 from app.utils.pnl import (
-    record_revenue,
+    module_pnl,
     module_revenue,
     module_spend,
-    module_pnl,
     pnl_summary,
+    record_revenue,
 )
-from app.db.models import RevenueEntry, BudgetEntry
 
 
 class TestRecordRevenue:
@@ -72,7 +71,7 @@ class TestModuleRevenue:
         old_entry = RevenueEntry(
             module="bounties",
             amount_eur=500.0,
-            earned_at=datetime.now(timezone.utc) - timedelta(hours=48),
+            earned_at=datetime.now(UTC) - timedelta(hours=48),
         )
         db_session.add(old_entry)
         db_session.commit()
@@ -85,7 +84,7 @@ class TestModuleRevenue:
         old = RevenueEntry(
             module="arbitrage",
             amount_eur=200.0,
-            earned_at=datetime.now(timezone.utc) - timedelta(hours=72),
+            earned_at=datetime.now(UTC) - timedelta(hours=72),
         )
         db_session.add(old)
         db_session.commit()
@@ -119,8 +118,8 @@ class TestModuleSpend:
         assert module_spend(db_session, module="arbitrage") == 0.0
 
     def test_module_spend_hours_filter(self, db_session):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=2)).strftime(
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        yesterday = (datetime.now(UTC) - timedelta(days=2)).strftime(
             "%Y-%m-%d"
         )
         db_session.add(BudgetEntry(date=today, category="gas", amount_eur=3.0, memo=""))
@@ -214,7 +213,7 @@ class TestPnlSummary:
         old = RevenueEntry(
             module="bounties",
             amount_eur=999.0,
-            earned_at=datetime.now(timezone.utc) - timedelta(hours=48),
+            earned_at=datetime.now(UTC) - timedelta(hours=48),
         )
         db_session.add(old)
         db_session.commit()

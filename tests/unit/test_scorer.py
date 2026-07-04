@@ -10,10 +10,9 @@ Tests cover:
 """
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-import pytest
-
+from app.llm.scorer import DESIRABLE_KEYWORDS as SCORER_KW
 from app.llm.scorer import (
     _build_prompt,
     _parse_llm_score,
@@ -21,7 +20,6 @@ from app.llm.scorer import (
     _score_with_llm,
     score_bounty,
 )
-from app.llm.scorer import DESIRABLE_KEYWORDS as SCORER_KW
 
 
 def _run(coro):

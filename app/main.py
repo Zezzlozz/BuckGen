@@ -13,10 +13,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from app.config import settings
-from app.db.models import Bounty, BountyStatus, Wallet, get_session, init_db
+from app.db.models import Bounty, BountyStatus, Wallet, WalletType, get_session, init_db
 from app.modules.rpc import summary as rpc_summary
 from app.modules.system import monitor
 from app.modules.wallet import sync_wallet_to_db, zero_keyring
@@ -36,6 +37,21 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
 )
 logger = logging.getLogger("buckgen")
+
+
+# ---------------------------------------------------------------------------
+# Request bodies
+# ---------------------------------------------------------------------------
+class DraftUpdate(BaseModel):
+    text: str
+
+
+# ---------------------------------------------------------------------------
+# Static review page
+# ---------------------------------------------------------------------------
+from pathlib import Path as _Path
+
+_REVIEW_HTML = _Path(__file__).resolve().parent / "static" / "review.html"
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +197,9 @@ async def lifespan(app: FastAPI):
             # Create 1 hot wallet per chain + 1 disposable for airdrops
             for chain in ["ethereum", "base", "arbitrum", "polygon", "bsc"]:
                 sync_wallet_to_db(db, index=0, chain=chain)
-            sync_wallet_to_db(db, index=1, chain="ethereum", wallet_type="disposable")
+            sync_wallet_to_db(
+                db, index=100, chain="ethereum", wallet_type=WalletType.DISPOSABLE
+            )
             logger.info("Seeded %d wallets from seed phrase", db.query(Wallet).count())
         db.close()
     except ValueError:
@@ -658,6 +676,34 @@ async def bounties_digest(limit: int = Query(default=15, ge=1, le=50)) -> dict:
         db.close()
 
 
+@app.get("/bounties/{bounty_id}/detail")
+async def bounties_detail(bounty_id: int = Path(ge=1)) -> dict:
+    """Full bounty record (issue + briefing + draft) for the review UI."""
+    from app.modules.bounty_review import get_detail
+
+    db = next(get_session())
+    try:
+        return get_detail(db, bounty_id)
+    finally:
+        db.close()
+
+
+@app.post("/bounties/{bounty_id}/draft/save")
+async def bounties_draft_save(
+    payload: DraftUpdate,
+    _: None = Depends(_require_api_key),
+    bounty_id: int = Path(ge=1),
+) -> dict:
+    """Persist an edited draft. Editing revokes any prior approval."""
+    from app.modules.bounty_review import save_draft
+
+    db = next(get_session())
+    try:
+        return save_draft(db, bounty_id, payload.text)
+    finally:
+        db.close()
+
+
 @app.post("/bounties/{bounty_id}/research")
 async def bounties_research(
     _: None = Depends(_require_api_key), bounty_id: int = Path(ge=1)
@@ -880,6 +926,18 @@ async def prices_history(
 # ---------------------------------------------------------------------------
 # Web dashboard
 # ---------------------------------------------------------------------------
+@app.get("/review", include_in_schema=False)
+async def review_page():
+    """Serve the human-in-the-loop bounty review GUI."""
+    try:
+        return HTMLResponse(_REVIEW_HTML.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return HTMLResponse(
+            "<h1>review.html not found</h1><p>Expected at app/static/review.html</p>",
+            status_code=500,
+        )
+
+
 @app.get("/dashboard", include_in_schema=False)
 async def web_dashboard():
     """

@@ -42,13 +42,13 @@ logger = logging.getLogger("buckgen.defi")
 # Constants
 # =============================================================================
 
-# 1inch API v5 endpoints per chain
+# 1inch API v5 endpoints per chain (1inch Business API)
 INCH_API_V5 = {
-    "ethereum": "https://api.1inch.dev/swap/v5.2/1",
-    "base": "https://api.1inch.dev/swap/v5.2/8453",
-    "arbitrum": "https://api.1inch.dev/swap/v5.2/42161",
-    "polygon": "https://api.1inch.dev/swap/v5.2/137",
-    "bsc": "https://api.1inch.dev/swap/v5.2/56",
+    "ethereum": "https://api.1inch.com/swap/v5.2/1",
+    "base": "https://api.1inch.com/swap/v5.2/8453",
+    "arbitrum": "https://api.1inch.com/swap/v5.2/42161",
+    "polygon": "https://api.1inch.com/swap/v5.2/137",
+    "bsc": "https://api.1inch.com/swap/v5.2/56",
 }
 
 # Common token addresses (USDC on each chain)
@@ -68,9 +68,6 @@ WNATIVE: dict[str, str] = {
     "polygon": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
     "bsc": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
 }
-
-SLIPPAGE = 0.5  # 0.5% default slippage
-
 
 # =============================================================================
 # Data types
@@ -114,7 +111,7 @@ async def get_swap_quote(
     from_token: str,  # "0x..." or "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" for native
     to_token: str,
     amount_wei: str,  # amount in wei as string
-    slippage: float = SLIPPAGE,
+    slippage: float = settings.SLIPPAGE,
 ) -> SwapQuote | None:
     """
     Get a swap quote from the 1inch API.
@@ -147,9 +144,12 @@ async def get_swap_quote(
     }
 
     try:
+        inch_headers = settings.http_headers()
+        if settings.INCH_API_KEY:
+            inch_headers["Authorization"] = f"Bearer {settings.INCH_API_KEY}"
         async with httpx.AsyncClient(
-            timeout=15.0,
-            headers=settings.http_headers(),
+            timeout=settings.HTTP_TIMEOUT,
+            headers=inch_headers,
             proxy=settings.proxy_config(),
         ) as client:
             resp = await client.get(
@@ -186,7 +186,7 @@ async def build_swap_transaction(
     to_token: str,
     amount_wei: str,
     wallet_address: str,
-    slippage: float = SLIPPAGE,
+    slippage: float = settings.SLIPPAGE,
 ) -> dict | None:
     """
     Build a swap transaction using the 1inch API.
@@ -207,9 +207,12 @@ async def build_swap_transaction(
     }
 
     try:
+        inch_headers = settings.http_headers()
+        if settings.INCH_API_KEY:
+            inch_headers["Authorization"] = f"Bearer {settings.INCH_API_KEY}"
         async with httpx.AsyncClient(
-            timeout=20.0,
-            headers=settings.http_headers(),
+            timeout=settings.HTTP_TIMEOUT,
+            headers=inch_headers,
             proxy=settings.proxy_config(),
         ) as client:
             resp = await client.get(
@@ -356,7 +359,7 @@ async def execute_swap(
             "to": Web3.to_checksum_address(tx_data["to"]),
             "data": tx_data["data"],
             "value": int(tx_data.get("value", "0")),
-            "gas": int(tx_data.get("gas", 200000)),
+            "gas": int(tx_data.get("gas", settings.GAS_LIMIT_SWAP)),
             "gasPrice": int(tx_data.get("gasPrice", w3.eth.gas_price)),
             "chainId": chain_id,
             "nonce": w3.eth.get_transaction_count(wallet_address),
@@ -367,7 +370,7 @@ async def execute_swap(
             estimated_gas = w3.eth.estimate_gas(tx)
             tx["gas"] = estimated_gas
         except Exception:
-            tx["gas"] = int(tx["gas"] * 1.2)  # 20% buffer
+            tx["gas"] = int(tx["gas"] * 1.2)  # 20% safety buffer
 
         # --- SIGN ---
         signed = w3.eth.account.sign_transaction(tx, private_key)
@@ -566,8 +569,8 @@ async def execute_cex_arbitrage(
     if not sell_exchange:
         return {"success": False, "error": f"No trade keys for {sell_exchange_name}"}
 
-    # Budget check: estimate max loss at 2% of capital
-    budget_needed = capital_eur * 0.02
+    # Budget check: estimate max loss as % of capital
+    budget_needed = capital_eur * settings.ARB_RISK_PCT
     if not can_spend(db, budget_needed):
         return {"success": False, "error": "Budget cap reached"}
 
@@ -580,7 +583,9 @@ async def execute_cex_arbitrage(
 
         # Calculate trade size: use min(capital / buy_price, available balance * 0.95)
         max_quote_capital = capital_eur  # assume ~1:1 EUR/USD for quote
-        trade_size_quote = min(max_quote_capital, quote_free * 0.95)
+        trade_size_quote = min(
+            max_quote_capital, quote_free * (1.0 - settings.TRADE_RESERVE_PCT)
+        )
 
         if trade_size_quote < 10:  # minimum $10 trade
             return {
@@ -666,7 +671,8 @@ async def execute_cex_arbitrage(
         fee_pct = 0.001  # 0.1% taker fee
         fee_cost = buy_cost * fee_pct + sell_cost * fee_pct
         net_profit_quote = gross_profit_quote - fee_cost
-        net_profit_eur = net_profit_quote  # ~1:1 USD/EUR
+        eur_usd_rate = await _get_eur_usd_rate()
+        net_profit_eur = net_profit_quote * eur_usd_rate
 
         # Skip if not profitable (slippage ate the spread)
         if net_profit_eur <= 0:
@@ -749,6 +755,52 @@ async def execute_cex_arbitrage(
 # =============================================================================
 
 
+async def _get_eth_price_usd() -> float:
+    """Fetch live ETH/USD price with graceful fallback chain.
+
+    Tries CoinGecko first, then ccxt Binance, then falls back to 2000.0.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT) as client:
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "ethereum", "vs_currencies": "usd"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if price := data.get("ethereum", {}).get("usd"):
+                return float(price)
+    except Exception:
+        logger.warning("[defi] CoinGecko ETH price fetch failed, trying ccxt")
+
+    try:
+        exchange = ccxt.binance()
+        ticker = exchange.fetch_ticker("ETH/USDT")
+        if ticker and ticker.get("last"):
+            return float(ticker["last"])
+    except Exception:
+        logger.warning("[defi] ccxt ETH price fetch failed, using fallback 2000.0")
+
+    return settings.ETH_USD_FALLBACK
+
+
+async def _get_eur_usd_rate() -> float:
+    """Fetch live EUR/USD from CoinGecko, falling back to settings.EUR_USD_FALLBACK."""
+    try:
+        async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT) as client:
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "usd", "vs_currencies": "eur"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if rate := data.get("usd", {}).get("eur"):
+                return float(rate)
+    except Exception:
+        logger.warning("[defi] CoinGecko EUR/USD fetch failed, using fallback")
+    return settings.EUR_USD_FALLBACK
+
+
 async def execute_arbitrage(
     db: Session,
     chain: str,
@@ -793,7 +845,9 @@ async def execute_arbitrage(
     is_cex_cex = buy_at in cex_names and sell_at in cex_names
 
     if is_cex_cex:
-        return await execute_cex_arbitrage(db, opportunity, capital_eur, confirm=confirm)
+        return await execute_cex_arbitrage(
+            db, opportunity, capital_eur, confirm=confirm
+        )
 
     # Fallback: on-chain swap via 1inch
     logger.info("[defi] On-chain arb: swapping on %s", chain)
@@ -801,8 +855,8 @@ async def execute_arbitrage(
     symbol = chain_config["symbol"]
     native_address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
-    # Calculate trade amount
-    trade_amount_eth = (capital_eur / 2) / 2000
+    eth_price_usd = await _get_eth_price_usd()
+    trade_amount_eth = (capital_eur / 2) / eth_price_usd
     w3 = get_web3(chain)
     if w3:
         try:
@@ -830,7 +884,7 @@ async def execute_arbitrage(
         from_token=native_address,
         to_token=usdc,
         amount_wei=str(max_trade),
-        amount_eur_estimate=capital_eur * 0.02,
+        amount_eur_estimate=capital_eur * settings.ARB_RISK_PCT,
         confirm=confirm,
     )
 

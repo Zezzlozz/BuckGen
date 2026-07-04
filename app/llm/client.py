@@ -24,8 +24,8 @@ logger = logging.getLogger("buckgen.llm")
 
 # In-memory TTL cache for LLM responses to avoid redundant API calls.
 # Keyed by hash(task_type + prompt), valued by (timestamp, response).
-# Cached items expire after LLM_CACHE_TTL seconds.
-LLM_CACHE_TTL = 1800  # 30 minutes
+# Cached items expire after settings.LLM_CACHE_TTL seconds.
+LLM_CACHE_TTL = settings.LLM_CACHE_TTL
 _llm_cache: dict[str, tuple[float, str]] = {}
 
 
@@ -72,8 +72,11 @@ async def call_llm(
     prompt: str,
     system_prompt: str = "",
     max_tokens: int = 256,
-    temperature: float = 0.1,
+    temperature: float | None = None,
 ) -> str | None:
+    if temperature is None:
+        temperature = settings.LLM_TEMPERATURE
+
     """
     Call an LLM with automatic model selection per task type.
 
@@ -159,11 +162,11 @@ async def _call_zen(
     fallbacks = _ZEN_FALLBACK_MODELS.get(task_type, [])
     models_to_try = [primary] + fallbacks
 
-    from openai import AsyncOpenAI
     from openai import (
         APIConnectionError,
         APIStatusError,
         APITimeoutError,
+        AsyncOpenAI,
         RateLimitError,
     )
 
@@ -198,7 +201,7 @@ async def _call_zen(
                 logger.debug("Zen returned empty response for %s", model)
                 break  # empty response is unlikely to succeed with different model
 
-            except RateLimitError as exc:
+            except RateLimitError:
                 logger.debug(
                     "Zen %s rate limited (attempt %d/%d)",
                     model,
@@ -215,7 +218,7 @@ async def _call_zen(
                     retries + 1,
                 )
 
-            except (APITimeoutError, APIConnectionError) as exc:
+            except (APITimeoutError, APIConnectionError):
                 logger.debug(
                     "Zen %s network error (attempt %d/%d)",
                     model,
@@ -288,7 +291,7 @@ async def _call_ollama(
 
     try:
         async with httpx.AsyncClient(
-            timeout=60.0,
+            timeout=settings.LLM_TIMEOUT,
             headers=settings.http_headers(),
             proxy=settings.proxy_config(),
         ) as client:

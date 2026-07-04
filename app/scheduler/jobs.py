@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import Bounty, BountyPlatform, BountyStatus, Wallet, get_session
 from app.llm.scorer import score_bounty
 from app.modules import gitcoin  # GitHub Issues bounty scanner
@@ -115,7 +116,7 @@ async def scan_bounties() -> None:
             db.add(bounty)
             new_count += 1
 
-            if float(llm_score) >= 0.6:
+            if float(llm_score) >= settings.BOUNTY_SCORE_THRESHOLD:
                 high_score_count += 1
                 await notify_bounty_found(
                     {
@@ -126,7 +127,10 @@ async def scan_bounties() -> None:
 
         db.commit()
         logger.info(
-            "[bounty] Scan complete: %d new, %d high-score (>=0.6)",
+            "[bounty] Scan complete: %d new, %d high-score (>=%s)",
+            new_count,
+            high_score_count,
+            settings.BOUNTY_SCORE_THRESHOLD,
             new_count,
             high_score_count,
         )
@@ -280,10 +284,14 @@ async def check_prices() -> None:
 
         # Notify on high-confidence opportunities
         top_opps = result.get("top_opportunities", [])
-        high_conf = [o for o in top_opps if o.get("confidence", 0) >= 0.6]
+        high_conf = [
+            o
+            for o in top_opps
+            if o.get("confidence", 0) >= settings.CONFIDENCE_THRESHOLD
+        ]
         if high_conf:
             lines = ["*Arbitrage Opportunities*"]
-            for opp in high_conf[:3]:
+            for opp in high_conf[: settings.MAX_ARB_NOTIFICATIONS]:
                 lines.append(
                     f"{opp['pair']}: Buy {opp['buy_at']} @ ${opp['buy_price']:.2f} "
                     f"-> Sell {opp['sell_at']} @ ${opp['sell_price']:.2f} "

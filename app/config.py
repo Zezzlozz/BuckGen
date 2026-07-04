@@ -83,6 +83,9 @@ class Settings:
         )
         self.BSC_RPC_URL: str = os.getenv("BSC_RPC_URL", "https://bsc.publicnode.com")
 
+        # -- 1inch API key ----------------------------------------------------
+        self.INCH_API_KEY: str = os.getenv("INCH_API_KEY", "")
+
         # -- Telegram alerts -------------------------------------------------
         self.TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -119,6 +122,105 @@ class Settings:
             "OLLAMA_BASE_URL", "http://localhost:11434"
         )
         self.OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
+
+        # -- Network timeouts ------------------------------------------------
+        self.HTTP_TIMEOUT: float = float(os.getenv("HTTP_TIMEOUT", "30.0"))
+        self.LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "60.0"))
+
+        # -- Live price fallbacks (used when live fetch fails) ----------------
+        self.EUR_USD_FALLBACK: float = float(os.getenv("EUR_USD_FALLBACK", "0.92"))
+        self.ETH_USD_FALLBACK: float = float(os.getenv("ETH_USD_FALLBACK", "2000.0"))
+
+        # -- LLM cache -------------------------------------------------------
+        self.LLM_CACHE_TTL: int = int(os.getenv("LLM_CACHE_TTL", "1800"))
+
+        # -- Trading defaults ------------------------------------------------
+        self.SLIPPAGE: float = float(os.getenv("SLIPPAGE", "0.5"))
+
+        # -- Arbitrage thresholds --------------------------------------------
+        self.MIN_PROFIT_THRESHOLD_PCT: float = float(
+            os.getenv("MIN_PROFIT_THRESHOLD_PCT", "0.8")
+        )
+        self.ARB_RISK_PCT: float = float(os.getenv("ARB_RISK_PCT", "0.02"))
+        self.TRADE_RESERVE_PCT: float = float(os.getenv("TRADE_RESERVE_PCT", "0.05"))
+        self.CONFIDENCE_THRESHOLD: float = float(
+            os.getenv("CONFIDENCE_THRESHOLD", "0.6")
+        )
+        self.MAX_ARB_NOTIFICATIONS: int = int(os.getenv("MAX_ARB_NOTIFICATIONS", "3"))
+        self.EXCHANGE_FEES_FALLBACK: float = float(
+            os.getenv("EXCHANGE_FEES_FALLBACK", "0.002")
+        )
+
+        # -- Gas / RPC -------------------------------------------------------
+        self.GAS_THRESHOLD_ETH: float = float(os.getenv("GAS_THRESHOLD_ETH", "0.0005"))
+        self.GAS_LIMIT_TRANSFER: int = int(os.getenv("GAS_LIMIT_TRANSFER", "21000"))
+        self.GAS_LIMIT_TX: int = int(os.getenv("GAS_LIMIT_TX", "100000"))
+        self.GAS_LIMIT_SWAP: int = int(os.getenv("GAS_LIMIT_SWAP", "200000"))
+
+        # -- Bounty / ROI thresholds -----------------------------------------
+        self.ROI_ALERT_THRESHOLD: float = float(
+            os.getenv("ROI_ALERT_THRESHOLD", "80.0")
+        )
+        self.BOUNTY_SCORE_THRESHOLD: float = float(
+            os.getenv("BOUNTY_SCORE_THRESHOLD", "0.6")
+        )
+        self.MIN_BOUNTY_SUBMIT_SCORE: float = float(
+            os.getenv("MIN_BOUNTY_SUBMIT_SCORE", "0.7")
+        )
+        self.MAX_BOUNTY_SUBMISSIONS: int = int(os.getenv("MAX_BOUNTY_SUBMISSIONS", "3"))
+        self.MAX_BOUNTY_RESULTS: int = int(os.getenv("MAX_BOUNTY_RESULTS", "100"))
+        self.GITCOIN_PER_PAGE: int = int(os.getenv("GITCOIN_PER_PAGE", "100"))
+
+        # -- Airdrop / faucet thresholds -------------------------------------
+        self.FAUCET_CIRCUIT_BREAKER: int = int(os.getenv("FAUCET_CIRCUIT_BREAKER", "5"))
+        self.WALLETS_PER_CHAIN: int = int(os.getenv("WALLETS_PER_CHAIN", "3"))
+        self.MAX_AIRDROP_RESULTS: int = int(os.getenv("MAX_AIRDROP_RESULTS", "10"))
+        self.AIRDROP_BASELINE_SCORE: float = float(
+            os.getenv("AIRDROP_BASELINE_SCORE", "0.3")
+        )
+        self.AIRDROP_POSITIVE_SIGNAL: float = float(
+            os.getenv("AIRDROP_POSITIVE_SIGNAL", "0.2")
+        )
+        self.AIRDROP_NEGATIVE_SIGNAL: float = float(
+            os.getenv("AIRDROP_NEGATIVE_SIGNAL", "0.3")
+        )
+
+        # -- Budget cost estimates (testnet / LLM / faucet ops) --------------
+        self.COST_FAUCET_CLAIM: float = float(os.getenv("COST_FAUCET_CLAIM", "0.001"))
+        self.COST_LLM_SUBMIT: float = float(os.getenv("COST_LLM_SUBMIT", "0.01"))
+        self.COST_TESTNET_TRANSFER: float = float(
+            os.getenv("COST_TESTNET_TRANSFER", "0.001")
+        )
+        self.COST_TESTNET_DEPLOY: float = float(
+            os.getenv("COST_TESTNET_DEPLOY", "0.002")
+        )
+        self.COST_TESTNET_NFT: float = float(os.getenv("COST_TESTNET_NFT", "0.001"))
+
+        # -- Circuit breaker / system ----------------------------------------
+        self.CIRCUIT_BREAKER_THRESHOLD: int = int(
+            os.getenv("CIRCUIT_BREAKER_THRESHOLD", "5")
+        )
+        self.CIRCUIT_BREAKER_RESET_SEC: int = int(
+            os.getenv("CIRCUIT_BREAKER_RESET_SEC", "3600")
+        )
+        self.ERROR_WINDOW_SEC: int = int(os.getenv("ERROR_WINDOW_SEC", "3600"))
+
+        # -- LLM scoring defaults --------------------------------------------
+        self.LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+        self.LLM_SCORE_MAX_TOKENS: int = int(os.getenv("LLM_SCORE_MAX_TOKENS", "128"))
+        self.HEURISTIC_BASELINE_SCORE: float = float(
+            os.getenv("HEURISTIC_BASELINE_SCORE", "0.5")
+        )
+        self.KEYWORD_BONUS_WEIGHT: float = float(
+            os.getenv("KEYWORD_BONUS_WEIGHT", "0.15")
+        )
+        self.META_BONUS_WEIGHT: float = float(os.getenv("META_BONUS_WEIGHT", "0.1"))
+        self.LARGE_REWARD_BONUS: float = float(os.getenv("LARGE_REWARD_BONUS", "0.1"))
+        self.SMALL_REWARD_BONUS: float = float(os.getenv("SMALL_REWARD_BONUS", "0.05"))
+        self.BATCH_WALLET_COUNT: int = int(os.getenv("BATCH_WALLET_COUNT", "5"))
+        self.BATCH_WALLET_START_INDEX: int = int(
+            os.getenv("BATCH_WALLET_START_INDEX", "10")
+        )
 
         # -- Debug ----------------------------------------------------------
         self.DEBUG: bool = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")

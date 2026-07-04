@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import Bounty, BountyStatus
 from app.llm.client import call_llm
 from app.modules.submit_bounty import post_comment
@@ -35,7 +36,7 @@ from app.utils.notify import notify_alert
 logger = logging.getLogger("buckgen.review")
 
 # High-ROI threshold ($ per hour) above which we ping you proactively.
-ROI_ALERT_THRESHOLD = float(80.0)
+ROI_ALERT_THRESHOLD = settings.ROI_ALERT_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +213,7 @@ def build_digest(db: Session, limit: int = 15) -> str:
         "",
     ]
     for i, item in enumerate(queue, 1):
-        lines.append(
-            f"## {i}. {item['title']}  —  ~${item['roi_per_hour']}/hr"
-        )
+        lines.append(f"## {i}. {item['title']}  —  ~${item['roi_per_hour']}/hr")
         lines.append(
             f"- **Reward:** {item['reward']}  ·  **Effort:** "
             f"{item['effort_hours']}h  ·  **Payout confidence:** "
@@ -366,6 +365,56 @@ async def post_approved(db: Session, bounty_id: int, confirm: bool = False) -> d
 
 
 # ---------------------------------------------------------------------------
+# Detail + editable draft (for the GUI)
+# ---------------------------------------------------------------------------
+def get_detail(db: Session, bounty_id: int) -> dict:
+    """Full bounty record for the review UI (issue + briefing + draft)."""
+    b = db.query(Bounty).filter(Bounty.id == bounty_id).first()
+    if not b:
+        return {"success": False, "error": "Bounty not found"}
+    return {
+        "success": True,
+        "id": b.id,
+        "title": b.title,
+        "description": b.description or "",
+        "reward": f"{b.reward_amount} {b.reward_currency}",
+        "url": b.url,
+        "status": b.status.value,
+        "score": b.score,
+        "roi_per_hour": b.roi_score,
+        "effort_hours": b.effort_hours,
+        "payout_confidence": b.payout_confidence,
+        "briefing": b.briefing or "",
+        "draft": b.draft_solution or "",
+        "approved_at": b.approved_at.isoformat() if b.approved_at else None,
+    }
+
+
+def save_draft(db: Session, bounty_id: int, text: str) -> dict:
+    """Persist an edited draft. Editing INVALIDATES any prior approval:
+    the bounty drops back to DRAFTED and must be re-approved before posting,
+    so you can never post content that differs from what you approved.
+    """
+    b = db.query(Bounty).filter(Bounty.id == bounty_id).first()
+    if not b:
+        return {"success": False, "error": "Bounty not found"}
+    if b.status == BountyStatus.APPLIED:
+        return {"success": False, "error": "Already posted — cannot edit."}
+
+    b.draft_solution = text
+    b.status = BountyStatus.DRAFTED
+    b.approved_at = None  # any edit revokes approval
+    b.updated_at = datetime.now(UTC)
+    db.commit()
+    return {
+        "success": True,
+        "bounty_id": b.id,
+        "status": b.status.value,
+        "note": "Draft saved. Approval reset — re-approve before posting.",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
 def _as_float(v, default: float) -> float:
@@ -379,7 +428,9 @@ def _safe_parse_json(text: str) -> dict | None:
     """Parse a JSON object from an LLM response, tolerating stray fences."""
     if not text:
         return None
-    cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```")
+    cleaned = (
+        text.strip().removeprefix("```json").removeprefix("```").removesuffix("```")
+    )
     # Grab the outermost brace pair if there's surrounding prose.
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:

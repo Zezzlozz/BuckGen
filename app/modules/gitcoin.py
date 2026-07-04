@@ -99,7 +99,7 @@ async def fetch_open_bounties(
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(
-            timeout=30.0,
+            timeout=settings.HTTP_TIMEOUT,
             headers=settings.http_headers(),
             proxy=settings.proxy_config(),
         )
@@ -154,7 +154,7 @@ async def _search_single_query(
 ) -> list[dict[str, Any]]:
     """Fetch all pages for a single search query."""
     items: list[dict[str, Any]] = []
-    per_page = min(max_bounties, 100)
+    per_page = min(max_bounties, settings.GITCOIN_PER_PAGE)
     page = 1
 
     try:

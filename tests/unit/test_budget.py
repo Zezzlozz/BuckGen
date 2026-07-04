@@ -7,18 +7,17 @@ Tests cover:
   - Guard checks (daily cap, stop-loss, combined can_spend)
 """
 
-import pytest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+from app.db.models import BudgetEntry
 from app.utils.budget import (
-    record_spend,
+    can_spend,
     daily_spend,
+    record_spend,
     total_spend,
     within_daily_cap,
     within_stop_loss,
-    can_spend,
 )
-from app.db.models import BudgetEntry
 
 
 class TestRecordSpend:
@@ -32,7 +31,7 @@ class TestRecordSpend:
         assert entry.category == "gas"
         assert entry.memo == "test"
         # date should be today's YYYY-MM-DD
-        assert entry.date == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert entry.date == datetime.now(UTC).strftime("%Y-%m-%d")
 
     def test_rounds_amount(self, db_session):
         entry = record_spend(db_session, 3.14159265, "gas")
@@ -66,9 +65,9 @@ class TestDailySpend:
 
     def test_ignores_yesterday_spend(self, db_session):
         """Entry with yesterday's date should NOT be counted in today's total."""
-        from datetime import timedelta, datetime, timezone
+        from datetime import datetime, timedelta
 
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+        yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime(
             "%Y-%m-%d"
         )
         entry = BudgetEntry(
@@ -91,10 +90,11 @@ class TestTotalSpend:
         assert total_spend(db_session) == 30.0
 
     def test_includes_old_dates(self, db_session):
-        from datetime import timedelta, datetime, timezone
+        from datetime import datetime, timedelta
+
         from app.db.models import BudgetEntry
 
-        old_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
+        old_date = (datetime.now(UTC) - timedelta(days=30)).strftime(
             "%Y-%m-%d"
         )
         db_session.add(

@@ -16,15 +16,17 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from app.config import settings
+
 logger = logging.getLogger("buckgen.system")
 
 # =============================================================================
 # Constants
 # =============================================================================
 
-CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failures before circuit opens
-CIRCUIT_BREAKER_RESET_SEC = 3600  # auto-reset after 1 hour
-ERROR_WINDOW_SEC = 3600  # track errors in last 1 hour
+CIRCUIT_BREAKER_THRESHOLD = settings.CIRCUIT_BREAKER_THRESHOLD
+CIRCUIT_BREAKER_RESET_SEC = settings.CIRCUIT_BREAKER_RESET_SEC
+ERROR_WINDOW_SEC = settings.ERROR_WINDOW_SEC
 
 
 # =============================================================================
@@ -211,9 +213,7 @@ class SystemMonitor:
             "modules_degraded": degraded,
             "modules_down": down,
             "errors_last_hour": self.errors_in_window(60),
-            "started_at": datetime.fromtimestamp(
-                self._started_at, tz=UTC
-            ).isoformat(),
+            "started_at": datetime.fromtimestamp(self._started_at, tz=UTC).isoformat(),
         }
 
     def get_detailed(self) -> dict:

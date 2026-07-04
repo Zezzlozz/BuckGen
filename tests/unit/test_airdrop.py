@@ -8,9 +8,7 @@ Tests cover:
   - Faucet registry completeness
 """
 
-import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
-
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # =============================================================================
 # Airdrop discovery
@@ -25,6 +23,9 @@ class TestDiscoverAirdrops:
     def test_discovers_from_github(self, mock_client_class, mock_settings):
         """Returns AirdropOpportunity objects from GitHub search results."""
         mock_settings.GITHUB_TOKEN = "test"
+        mock_settings.AIRDROP_BASELINE_SCORE = 0.3
+        mock_settings.AIRDROP_POSITIVE_SIGNAL = 0.2
+        mock_settings.AIRDROP_NEGATIVE_SIGNAL = 0.3
 
         mock_client = AsyncMock()
         mock_client_class.return_value.__aenter__.return_value = mock_client
@@ -129,8 +130,8 @@ class TestRegisterWalletsForAirdrop:
         mock_client.get.return_value = MagicMock(status_code=200, json=lambda: [])
 
         from app.modules.airdrop import (
-            register_wallets_for_airdrop,
             AirdropOpportunity,
+            register_wallets_for_airdrop,
         )
         from app.modules.wallet import sync_wallet_to_db
 
@@ -153,8 +154,8 @@ class TestRegisterWalletsForAirdrop:
         mock_client.get.return_value = MagicMock(status_code=200, json=lambda: [])
 
         from app.modules.airdrop import (
-            register_wallets_for_airdrop,
             AirdropOpportunity,
+            register_wallets_for_airdrop,
         )
         from app.modules.wallet import sync_wallet_to_db
 

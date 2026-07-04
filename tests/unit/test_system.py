@@ -12,9 +12,7 @@ Tests cover:
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from app.modules.system import (
     CIRCUIT_BREAKER_RESET_SEC,
